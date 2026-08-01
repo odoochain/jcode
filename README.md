@@ -717,6 +717,7 @@ Notes:
 - [Windows Notes](docs/WINDOWS.md)
 - [Wrappers and Shell Integration](docs/WRAPPERS.md)
 - [Refactoring Notes](docs/REFACTORING.md)
+- [TLS Self-Signed Cert Support & Auth-Test Fixes](docs/TLS_SELF_SIGNED_CERT_SUPPORT.md)
 
 ---
 
