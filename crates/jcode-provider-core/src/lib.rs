@@ -14,6 +14,8 @@ pub mod retry_after;
 pub mod selection;
 pub mod transport;
 
+use std::sync::OnceLock;
+
 pub use transport::is_transient_transport_error;
 
 pub use anthropic::{
@@ -663,6 +665,31 @@ pub fn fresh_transport_client() -> reqwest::Client {
         .pool_max_idle_per_host(0)
         .build()
         .unwrap_or_else(|_| shared_http_client())
+}
+
+/// HTTP client that accepts self-signed / invalid TLS certificates.
+///
+/// Use for provider endpoints that use self-signed certs (e.g. internal gateways,
+/// development servers).  Prefer `shared_http_client()` for production endpoints.
+pub fn insecure_http_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .user_agent(JCODE_USER_AGENT)
+                .connect_timeout(Duration::from_secs(15))
+                .tcp_keepalive(Some(Duration::from_secs(30)))
+                .http2_keep_alive_interval(Some(Duration::from_secs(30)))
+                .http2_keep_alive_timeout(Duration::from_secs(15))
+                .http2_keep_alive_while_idle(true)
+                .pool_idle_timeout(Duration::from_secs(90))
+                .pool_max_idle_per_host(8)
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true)
+                .build()
+                .expect("failed to build insecure HTTP client")
+        })
+        .clone()
 }
 
 #[derive(Debug, Clone)]
