@@ -698,6 +698,11 @@ pub fn apply_named_provider_profile_env_from_config(
             "0"
         },
     );
+    if profile.accept_invalid_certs.unwrap_or(false) {
+        crate::env::set_var("JCODE_ACCEPT_INVALID_CERTS", "1");
+    } else {
+        crate::env::remove_var("JCODE_ACCEPT_INVALID_CERTS");
+    }
 
     if let Some(model) = profile
         .default_model

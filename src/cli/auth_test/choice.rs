@@ -139,8 +139,23 @@ fn nvidia_nim_model_supports_openai_tools(model: &str) -> bool {
 async fn discover_openai_compatible_validation_model(
     profile: &crate::provider_catalog::ResolvedOpenAiCompatibleProfile,
 ) -> Result<Option<String>> {
-    let url = format!("{}/models", profile.api_base.trim_end_matches('/'));
-    let mut request = crate::provider::shared_http_client().get(&url);
+    // When --provider-profile is active, dispatch.rs has set
+    // JCODE_OPENROUTER_API_BASE to the profile's configured base_url.
+    // Use that instead of the built-in profile's hardcoded default.
+    // NOTE: We read JCODE_OPENROUTER_API_BASE specifically (not
+    // JCODE_OPENAI_COMPAT_API_BASE) because apply_openai_compatible_profile_env
+    // overwrites the latter from the built-in profile struct, while the former
+    // carries the user-configured value from dispatch.rs.
+    let api_base = std::env::var("JCODE_OPENROUTER_API_BASE")
+        .unwrap_or_else(|_| profile.api_base.clone());
+    let url = format!("{}/models", api_base.trim_end_matches('/'));
+    // Use insecure client when the named profile has accept_invalid_certs=true
+    let http_client = if std::env::var_os("JCODE_ACCEPT_INVALID_CERTS").is_some() {
+        crate::provider::insecure_http_client()
+    } else {
+        crate::provider::shared_http_client()
+    };
+    let mut request = http_client.get(&url);
     if matches!(profile.id.as_str(), "kimi" | "alibaba-coding-plan" | "zai") {
         request = request
             .header("User-Agent", "claude-cli/1.0.0")
