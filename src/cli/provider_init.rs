@@ -1213,6 +1213,12 @@ fn disable_subscription_runtime_mode_preserving_active_provider_profile() {
 pub fn apply_login_provider_profile_env(provider: LoginProviderDescriptor) {
     match provider.target {
         LoginProviderTarget::OpenAiCompatible(profile) => {
+            // Don't overwrite an already-active named provider profile (set via
+            // --provider-profile). Its env vars are correct; applying the built-in
+            // profile would redirect credential probes to the wrong env-file / key.
+            if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some() {
+                return;
+            }
             force_apply_openai_compatible_profile_env(Some(profile));
             // Bootstrap login still spawns the daemon with `--provider auto`. Mark the
             // just-selected compatible provider as active so the child process does

@@ -475,6 +475,10 @@ pub struct NamedProviderConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub supports_reasoning_effort: Option<bool>,
+    /// Accept invalid/self-signed TLS certificates for this endpoint.
+    /// Required for endpoints using self-signed certificates (e.g. internal gateways).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_invalid_certs: Option<bool>,
 }
 
 impl Default for NamedProviderConfig {
@@ -496,6 +500,7 @@ impl Default for NamedProviderConfig {
             models: Vec::new(),
             extra_body: None,
             supports_reasoning_effort: None,
+            accept_invalid_certs: None,
         }
     }
 }

@@ -1345,7 +1345,11 @@ impl OpenRouterProvider {
             })
             .collect::<HashMap<_, _>>();
         Ok(Self {
-            client: jcode_provider_core::shared_http_client(),
+            client: if profile.accept_invalid_certs.unwrap_or(false) {
+                jcode_provider_core::insecure_http_client()
+            } else {
+                jcode_provider_core::shared_http_client()
+            },
             model: Arc::new(RwLock::new(model)),
             reasoning_effort: Arc::new(RwLock::new(Self::initial_reasoning_effort(
                 profile.supports_reasoning_effort,
