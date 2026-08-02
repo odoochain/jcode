@@ -687,7 +687,7 @@ pub fn insecure_http_client() -> reqwest::Client {
                 .danger_accept_invalid_certs(true)
                 .danger_accept_invalid_hostnames(true)
                 .build()
-                .expect("failed to build insecure HTTP client")
+                .unwrap_or_else(|_| shared_http_client())
         })
         .clone()
 }
