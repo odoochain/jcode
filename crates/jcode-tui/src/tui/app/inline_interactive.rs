@@ -1464,6 +1464,36 @@ impl App {
             (avail, method, cheapness, r.provider.clone())
         }
 
+        /// Coarse provider tier for entry-level ordering. Every configured /
+        /// authenticated provider (OAuth, API key, OpenAI-compatible profiles,
+        /// Copilot, Cursor, Bedrock, subscription, Code Assist, Antigravity, ...)
+        /// collapses into tier 0 so the picker surfaces pre-configured models
+        /// ahead of OpenRouter's auto-discovered public catalog (tier 1). This is
+        /// deliberately coarser than `route_sort_key`'s per-route ranking: within
+        /// a configured model the fine-grained OAuth > API key > Copilot >
+        /// OpenRouter preference still applies via `route_sort_key`, but at the
+        /// entry level all configured providers share a tier so they are not
+        /// split apart (and thus not separated by the alphabetical fallback).
+        fn entry_provider_tier(api_method: &str) -> u8 {
+            match crate::provider::ModelRouteApiMethod::parse(api_method) {
+                crate::provider::ModelRouteApiMethod::ClaudeOAuth
+                | crate::provider::ModelRouteApiMethod::AnthropicApiKey
+                | crate::provider::ModelRouteApiMethod::OpenAIOAuth
+                | crate::provider::ModelRouteApiMethod::OpenAIApiKey
+                | crate::provider::ModelRouteApiMethod::JcodeSubscription
+                | crate::provider::ModelRouteApiMethod::CodeAssistOAuth
+                | crate::provider::ModelRouteApiMethod::OpenAiCompatible { .. }
+                | crate::provider::ModelRouteApiMethod::Bedrock
+                | crate::provider::ModelRouteApiMethod::AntigravityHttps
+                | crate::provider::ModelRouteApiMethod::Cursor
+                | crate::provider::ModelRouteApiMethod::Copilot => 0,
+                crate::provider::ModelRouteApiMethod::OpenRouter
+                | crate::provider::ModelRouteApiMethod::RemoteCatalog
+                | crate::provider::ModelRouteApiMethod::Current
+                | crate::provider::ModelRouteApiMethod::Other(_) => 1,
+            }
+        }
+
         fn route_matches_recent_auth(route_provider: &str, login_provider: &str) -> bool {
             jcode_provider_core::model_route_provider_labels_related(route_provider, login_provider)
         }
@@ -1694,6 +1724,19 @@ impl App {
             } else {
                 usize::MAX
             };
+            // Configured/authenticated providers (OAuth, API key, OpenAI-compatible,
+            // Copilot, Cursor, Bedrock, ...) rank above OpenRouter's auto-discovered
+            // catalog so pre-configured models surface first. Applied after the
+            // `recommended` block so hardcoded premium recommendations still
+            // dominate provider tiering.
+            let a_tier = a
+                .active_option()
+                .map(|route| entry_provider_tier(&route.api_method))
+                .unwrap_or(u8::MAX);
+            let b_tier = b
+                .active_option()
+                .map(|route| entry_provider_tier(&route.api_method))
+                .unwrap_or(u8::MAX);
             let a_avail = if a.options.first().map(|r| r.available).unwrap_or(false) {
                 0u8
             } else {
@@ -1713,6 +1756,7 @@ impl App {
                 .then(a_usage.cmp(&b_usage))
                 .then(a_rec.cmp(&b_rec))
                 .then(a_rec_rank.cmp(&b_rec_rank))
+                .then(a_tier.cmp(&b_tier))
                 .then(a_avail.cmp(&b_avail))
                 .then(a_old.cmp(&b_old))
                 .then(a.name.cmp(&b.name))
