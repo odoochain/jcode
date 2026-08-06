@@ -248,7 +248,7 @@ fn test_jcode_subscription_set_route_is_wire_safe() -> Result<()> {
             model: "gpt-5.5".to_string(),
             runtime_key: jcode_provider_core::RuntimeKey::JcodeSubscription,
             api_method: "jcode-subscription".to_string(),
-            provider_label: "Jcode Subscription".to_string(),
+            provider_label: "Jcode Hosted Models".to_string(),
             detail: "jcode subscription routing · managed server-side".to_string(),
         },
     };
@@ -416,6 +416,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
             ("image/jpeg".to_string(), "BBB".to_string()),
         ],
         system_reminder: Some("be concise".to_string()),
+        no_reply: true,
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;
@@ -424,6 +425,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
         content,
         images,
         system_reminder,
+        no_reply,
     } = decoded
     else {
         return Err(anyhow!("expected Message"));
@@ -434,6 +436,7 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
     assert_eq!(images[0].0, "image/png");
     assert_eq!(images[1].0, "image/jpeg");
     assert_eq!(system_reminder.as_deref(), Some("be concise"));
+    assert!(no_reply);
     Ok(())
 }
 

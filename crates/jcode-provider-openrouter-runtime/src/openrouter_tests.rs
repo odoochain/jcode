@@ -806,7 +806,7 @@ fn openai_compatible_profiles_with_unverified_live_catalogs_have_static_fallback
 }
 
 #[test]
-fn comtegra_profile_uses_endpoint_default_max_tokens() {
+fn profiles_use_endpoint_default_max_tokens() {
     let _lock = ENV_LOCK.lock();
     let _override = EnvVarGuard::remove("JCODE_OPENROUTER_MAX_TOKENS");
 
@@ -816,6 +816,10 @@ fn comtegra_profile_uses_endpoint_default_max_tokens() {
     );
     assert_eq!(
         OpenRouterProvider::configured_max_tokens(Some("deepseek")),
+        None
+    );
+    assert_eq!(
+        OpenRouterProvider::configured_max_tokens(Some("celeris")),
         None
     );
 }
@@ -2336,13 +2340,13 @@ fn jcode_subscription_runtime_has_explicit_display_and_route_identity() {
     );
 
     let provider = OpenRouterProvider::new().expect("build jcode subscription runtime");
-    assert_eq!(provider.runtime_display_name(), "Jcode Subscription");
-    assert_eq!(Provider::display_name(&provider), "Jcode Subscription");
+    assert_eq!(provider.runtime_display_name(), "Jcode Hosted Models");
+    assert_eq!(Provider::display_name(&provider), "Jcode Hosted Models");
     assert_eq!(Provider::name(&provider), "openrouter");
     assert_eq!(
         provider.direct_openai_compatible_route_parts(),
         Some((
-            "Jcode Subscription".to_string(),
+            "Jcode Hosted Models".to_string(),
             "jcode-subscription".to_string(),
             jcode_base::subscription_catalog::DEFAULT_JCODE_API_BASE.to_string(),
         ))
