@@ -10,10 +10,12 @@
 [![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/nBe9vGyK9a)
 
 The most RAM efficient harness <br>
-The most most intelligent harness
+The most intelligent harness
 
-<a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-memory-demo.mp4">
-  <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-memory-demo.webp" alt="jcode memory demonstration" width="800">
+<a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
+
+<a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.mp4">
+  <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.webp" alt="jcode YC launch video" width="800">
 </a>
 
 <br>
@@ -338,6 +340,7 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 - **Alibaba Cloud Coding Plan** (`jcode login --provider alibaba-coding-plan`)
 - **Fireworks** (`jcode login --provider fireworks`)
 - **MiniMax** (`jcode login --provider minimax`)
+- **Meta Model API / Muse** (`jcode login --provider meta-muse`)
 - **LM Studio** (`jcode login --provider lmstudio`)
 - **Ollama** (`jcode login --provider ollama`)
 - **Custom OpenAI-compatible endpoint** (`jcode login --provider openai-compatible`)
@@ -360,12 +363,14 @@ There are two ways to set one up:
   jcode login --provider <profile-id>
   # for example:
   jcode login --provider openrouter
+  jcode login --provider orcarouter
   jcode login --provider deepseek
   jcode login --provider opencode      # OpenCode Zen
   jcode login --provider moonshotai
+  jcode login --provider meta-muse     # Meta Model API / Muse Spark
   ```
 
-  Built-in OpenAI-compatible profile ids include: `openrouter`, `deepseek`, `zai`, `kimi`, `moonshotai`, `opencode` (OpenCode Zen), `opencode-go`, `302ai`, `baseten`, `cortecs`, `huggingface`, `nebius`, `scaleway`, `stackit`, and `firmware`. Each profile only sets the endpoint and key variable; you still pick the model with `/model` (or `--model`). Run `jcode login` with no provider to see the interactive list.
+  Built-in OpenAI-compatible profile ids include: `openrouter`, `orcarouter`, `deepseek`, `zai`, `kimi`, `moonshotai`, `meta-muse` (Meta Model API / Muse Spark), `opencode` (OpenCode Zen), `opencode-go`, `302ai`, `baseten`, `cortecs`, `huggingface`, `nebius`, `scaleway`, `stackit`, and `firmware`. Each profile only sets the endpoint and key variable; you still pick the model with `/model` (or `--model`). Run `jcode login` with no provider to see the interactive list.
 
 - **Any other endpoint** — point jcode at an arbitrary OpenAI-compatible API (hosted or local) with `jcode login --provider openai-compatible` or the scriptable `jcode provider add` command described below.
 
@@ -444,11 +449,46 @@ base_url = "https://llm.example.com/v1"
 api_key_env = "JCODE_PROVIDER_MY_API_API_KEY"
 env_file = "provider-my-api.env"
 default_model = "my-model-id"
+# Optional: prevent model names such as `gpt-5-*` from automatically enabling
+# `reasoning_effort` on gateways that reject it.
+disable_reasoning_heuristics = true
 
 [[providers.my-api.models]]
 id = "my-model-id"
 context_window = 128000
+# Explicitly enable `/effort` and select this model's initial effort. Set
+# `reasoning = false` on an individual model to disable it instead.
+reasoning = true
+reasoning_effort = "high"
 ```
+
+Anthropic Messages-compatible gateways use the same named-profile surface with
+`type = "anthropic-compatible"`. The profile can select bearer, custom-header,
+or no authentication and attach gateway-specific headers to every request:
+
+```toml
+[provider]
+default_provider = "corp-claude"
+default_model = "claude-sonnet-4-6"
+
+[providers.corp-claude]
+type = "anthropic-compatible"
+base_url = "https://gateway.example.com/anthropic/v1"
+auth = "bearer"
+api_key_env = "CORP_CLAUDE_TOKEN"
+default_model = "claude-sonnet-4-6"
+
+[providers.corp-claude.headers]
+x-tenant-id = "tenant-42"
+
+[[providers.corp-claude.models]]
+id = "claude-sonnet-4-6"
+context_window = 200000
+```
+
+For direct environment-based configuration, `ANTHROPIC_BASE_URL` overrides the
+non-OAuth Messages endpoint and `ANTHROPIC_AUTH_TOKEN` is sent as a bearer token.
+Claude OAuth traffic always continues to use Anthropic's official endpoints.
 
 ##### Extra request-body fields (`extra_body`)
 
@@ -574,7 +614,7 @@ The above image is the first page of provider logins
 ### Supported provider
 
 - **Native / first-party style providers:** `claude`, `openai`, `copilot`, `gemini`, `azure`, `alibaba-coding-plan`
-- **Aggregator / compatibility providers:** `openrouter`, `openai-compatible`
+- **Aggregator / compatibility providers:** `openrouter`, `orcarouter`, `openai-compatible`
 - **Additional provider integrations:** `opencode`, `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `fireworks`, `minimax`, `xai`, `lmstudio`, `ollama`, `chutes`, `cerebras`, `cursor`, `antigravity`, `google`
 
 Jcode also supports easy multi-account switching. Ran out of tokens on your first ChatGPT Pro subscription? /account and quickly switch to your second. 

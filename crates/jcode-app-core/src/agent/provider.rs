@@ -57,6 +57,21 @@ impl Agent {
         Ok(())
     }
 
+    fn refresh_compaction_budget(&self) {
+        let compaction = self.registry.compaction();
+        match compaction.try_write() {
+            Ok(mut manager) => manager.set_budget(self.provider.context_window()),
+            Err(_) => crate::logging::warn(
+                "Could not refresh compaction token budget after provider change: compaction manager is busy",
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn compaction_token_budget(&self) -> usize {
+        self.registry.compaction().read().await.token_budget()
+    }
+
     pub fn provider_messages(&mut self) -> Vec<Message> {
         self.session.messages_for_provider()
     }
@@ -97,9 +112,10 @@ impl Agent {
         let resolved_model = self.provider.model();
         self.session.provider_key = Some(selection.runtime_key.stable_id());
         self.session.route_api_method = Some(selection.api_method.clone());
-        self.session.model = Some(resolved_model.clone());
+        self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
+        self.refresh_compaction_budget();
         self.persist_session_best_effort("route selection");
         self.log_env_snapshot("set_route_selection");
         Ok(())
@@ -125,9 +141,10 @@ impl Agent {
                 self.provider.name(),
                 self.session.provider_key.as_deref(),
             );
-        self.session.model = Some(resolved_model.clone());
+        self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
+        self.refresh_compaction_budget();
         self.persist_session_best_effort("model selection");
         self.log_env_snapshot("set_model");
         Ok(())
@@ -242,6 +259,7 @@ impl Agent {
             return;
         }
         self.session.working_dir = Some(dir.to_string());
+        self.refresh_agents_md_snapshot();
         self.session.refresh_initial_session_context_message();
         self.log_env_snapshot("working_dir");
     }

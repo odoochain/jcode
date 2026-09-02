@@ -583,18 +583,14 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    for assessment in [
-        "Closed feedback loop strong",
-        "Relevance representative",
-        "Coverage main_paths",
-        "Delivery workflow_validated",
-    ] {
+    for assessment in ["Closed feedback loop strong", "Delivery workflow_validated"] {
         assert!(plain.contains(assessment), "{plain}");
     }
-    // Plan-level intent renders once, above the groups.
-    assert!(plain.contains("Understands user intent clear"), "{plain}");
+    assert!(!plain.contains("Relevance representative"), "{plain}");
+    assert!(!plain.contains("Coverage main_paths"), "{plain}");
+    // Only the plan-level assessment renders above the groups.
     assert!(
-        plain.contains("User intention · Keep the agent aligned with the user's request"),
+        plain.contains("Intent clear: Keep the agent aligned"),
         "{plain}"
     );
     assert!(!plain.contains("Feedback ·"), "{plain}");
@@ -604,7 +600,7 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
 }
 
 #[test]
-fn render_todos_message_compacts_long_details_at_narrow_widths() {
+fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
     let long_text = "This deliberately long assessment detail should not consume several rows in a narrow terminal window";
     let todos = vec![crate::todo::TodoItem {
         id: "1".to_string(),
@@ -620,6 +616,7 @@ fn render_todos_message_compacts_long_details_at_narrow_widths() {
     }];
     let plan = crate::todo::TodoPlan {
         user_intention: Some(long_text.to_string()),
+        understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
         ..Default::default()
     };
     let goals = vec![crate::todo::TodoGoal {
@@ -638,11 +635,9 @@ fn render_todos_message_compacts_long_details_at_narrow_widths() {
     assert_eq!(
         narrow
             .iter()
-            .filter(|line| line.contains("User intention"))
+            .filter(|line| line.contains("Intent partial:"))
             .count(),
-        1,
-        "{}",
-        narrow.join("\n")
+        1
     );
     assert_eq!(
         narrow
@@ -651,11 +646,6 @@ fn render_todos_message_compacts_long_details_at_narrow_widths() {
             .count(),
         0,
         "verbose goal feedback should stay out of inline cards: {}",
-        narrow.join("\n")
-    );
-    assert!(
-        narrow.iter().any(|line| line.contains('…')),
-        "{}",
         narrow.join("\n")
     );
     assert!(
@@ -671,8 +661,23 @@ fn render_todos_message_compacts_long_details_at_narrow_widths() {
         .map(extract_line_text)
         .collect::<Vec<_>>();
     assert!(
-        wide.len() > narrow.len(),
-        "wide={wide:?}\nnarrow={narrow:?}"
+        wide.iter()
+            .any(|line| line.contains("Intent partial: This deliberately long assessment detail")),
+        "wide={wide:?}"
+    );
+    assert!(
+        wide.iter().any(|line| line.contains('…')),
+        "wide intent should remain on one ellipsized line: {wide:?}"
+    );
+    assert!(
+        !narrow
+            .iter()
+            .any(|line| line.contains("narrow terminal window")),
+        "narrow={narrow:?}"
+    );
+    assert!(
+        narrow.iter().any(|line| line.contains('…')),
+        "narrow intent should be ellipsized: {narrow:?}"
     );
 }
 
@@ -714,11 +719,108 @@ fn render_todos_message_uses_readable_semantic_colors() {
     };
 
     assert_eq!(color_for("todo rendering"), Some(todo_group_color()));
+    assert_eq!(color_for("clear"), Some(todo_score_color()));
     assert_eq!(color_for("Readable metadata"), Some(todo_meta_color()));
     assert_eq!(color_for("● "), Some(asap_color()));
     assert_eq!(color_for(" (high)"), None);
     assert_eq!(color_for(" · plausible"), Some(todo_confidence_color()));
+    assert_eq!(color_for("strong"), Some(todo_warning_color()));
+    assert_eq!(color_for("missing"), Some(todo_failure_color()));
     assert_ne!(todo_meta_color(), dim_color());
+}
+
+#[test]
+fn render_todos_message_color_codes_every_intent_state() {
+    let cases = [
+        (
+            crate::todo::IntentUnderstanding::Uncertain,
+            todo_failure_color(),
+        ),
+        (
+            crate::todo::IntentUnderstanding::Partial,
+            todo_warning_color(),
+        ),
+        (crate::todo::IntentUnderstanding::Clear, todo_score_color()),
+        (
+            crate::todo::IntentUnderstanding::Complete,
+            todo_score_color(),
+        ),
+    ];
+
+    for (state, expected_color) in cases {
+        let state_text = state.as_str().to_string();
+        let msg = DisplayMessage::todos(
+            serde_json::json!({
+                "todos": [],
+                "plan": {
+                    "user_intention": "Keep intent visible",
+                    "understands_user_intent": state,
+                },
+                "goals": [],
+            })
+            .to_string(),
+        );
+        let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+        let rendered_color = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.as_ref() == state_text)
+            .and_then(|span| span.style.fg);
+
+        assert_eq!(
+            rendered_color,
+            Some(expected_color),
+            "intent state {state_text} should keep its semantic color in the todo renderer"
+        );
+    }
+}
+
+#[test]
+fn render_todos_message_collapses_passing_quality_gates() {
+    let todos = vec![crate::todo::TodoItem {
+        id: "1".to_string(),
+        content: "Verify the result".to_string(),
+        status: "completed".to_string(),
+        priority: "high".to_string(),
+        group: Some("quality".to_string()),
+        confidence: None,
+        completion_confidence: Some(crate::todo::ConfidenceState::Validated),
+        confidence_history: Vec::new(),
+        blocked_by: Vec::new(),
+        assigned_to: None,
+    }];
+    let goals = vec![crate::todo::TodoGoal {
+        group: Some("quality".to_string()),
+        closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
+        feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::AcceptanceAligned),
+        feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths),
+        feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
+        delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+        ..Default::default()
+    }];
+    let msg =
+        DisplayMessage::todos(serde_json::json!({ "todos": todos, "goals": goals }).to_string());
+    let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("✓ All quality gates passing"), "{plain}");
+    assert!(plain.contains("Delivery outcome_delivered"), "{plain}");
+    assert!(!plain.contains("Closed feedback loop closed"), "{plain}");
+    assert!(!plain.contains("Relevance acceptance_aligned"), "{plain}");
+    assert!(
+        !plain.contains("Coverage edge_and_integration_paths"),
+        "{plain}"
+    );
+    let passing = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "✓ All quality gates passing")
+        .and_then(|span| span.style.fg);
+    assert_eq!(passing, Some(todo_score_color()));
 }
 
 #[test]
@@ -832,10 +934,10 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
 
     assert!(!plain.contains("Todos"), "{plain}");
     assert!(plain.contains("todo rendering  ●"), "{plain}");
-    assert!(
-        plain.contains("Closed feedback loop strong · Delivery workflow_validated"),
-        "{plain}"
-    );
+    assert!(plain.contains("Closed feedback loop strong"), "{plain}");
+    assert!(plain.contains("Relevance missing"), "{plain}");
+    assert!(plain.contains("Coverage missing"), "{plain}");
+    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
     assert!(
         plain.contains("● Render the todo result · plausible"),
         "{plain}"
@@ -1151,10 +1253,8 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
         }),
     );
     assert!(initial.contains("pelican-bike-animation"), "{initial}");
-    assert!(
-        without_whitespace(&initial).contains(&without_whitespace(INITIAL_FEEDBACK)),
-        "initial feedback loop was truncated:\n{initial}"
-    );
+    assert!(initial.contains("Closed feedback loop strong"), "{initial}");
+    assert!(!without_whitespace(&initial).contains(&without_whitespace(INITIAL_FEEDBACK)));
 
     // Simulate a restored/mirrored result whose ToolCall association was lost.
     // The structured result must still render as the same complete todo card.
@@ -1172,21 +1272,12 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
     let compact_revised = without_whitespace(&revised);
     assert!(revised.contains("pelican-bike-animation"), "{revised}");
     assert!(
-        compact_revised.contains(&without_whitespace(REVISED_OBJECTIVE)),
-        "revised plan intention was truncated:\n{revised}"
+        revised.contains("Relevance missing · Coverage missing · Traceability missing"),
+        "{revised}"
     );
-    assert!(
-        compact_revised.contains(&without_whitespace(REVISED_FEEDBACK)),
-        "revised feedback loop was truncated:\n{revised}"
-    );
-    let goal_details = revised
-        .split("● Implement")
-        .next()
-        .expect("todo item should follow the goal details");
-    assert!(
-        !goal_details.contains('…'),
-        "todo goal details must not truncate:\n{revised}"
-    );
+    assert!(!revised.contains("Closed feedback loop closed"));
+    assert!(!compact_revised.contains(&without_whitespace(REVISED_FEEDBACK)));
+    assert!(revised.contains("● Implement"), "{revised}");
 }
 
 #[test]
@@ -1217,6 +1308,7 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
         group: Some("pelican-bike".to_string()),
         closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(98)),
         feedback_loop: Some(FEEDBACK.to_string()),
+        feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
         ..Default::default()
     }];
     let plan = crate::todo::TodoPlan {
@@ -1274,10 +1366,11 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
         compact.contains(&without_whitespace(OBJECTIVE)),
         "batched todo plan intention was truncated:\n{rendered}"
     );
-    assert!(
-        compact.contains(&without_whitespace(FEEDBACK)),
-        "batched todo feedback loop was truncated:\n{rendered}"
-    );
+    // Compact transcript cards show the goal's quality assessments rather than
+    // repeating its potentially long feedback-loop prose. The full prose remains
+    // available in the serialized todo payload and the todos side panel.
+    assert!(rendered.contains("Relevance missing · Coverage missing"));
+    assert!(!compact.contains(&without_whitespace(FEEDBACK)));
     let goal_details = rendered
         .split_once("pelican-bike")
         .map(|(_, details)| details)
@@ -1304,6 +1397,9 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
         group: Some("ship outcome".to_string()),
         closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(100)),
         feedback_loop: Some("Run the complete workflow".to_string()),
+        feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+        feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+        feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
         delivery_state: Some(crate::todo::DeliveryState::from_legacy_score(80)),
         ..Default::default()
     }];
@@ -1337,7 +1433,7 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
     assert!(plain.contains("ship outcome  ●"), "{plain}");
     assert!(plain.contains("Deliver the complete workflow"), "{plain}");
     assert!(
-        plain.contains("Closed feedback loop closed · Delivery workflow_validated"),
+        plain.contains("✓ All quality gates passing · Delivery workflow_validated"),
         "{plain}"
     );
     assert!(!plain.contains("todo 1 items"), "{plain}");
@@ -1722,7 +1818,7 @@ fn render_system_message_centered_mode_caps_wrap_width_for_visible_gutters() {
 }
 
 #[test]
-fn render_system_message_uses_reload_card_for_reload_title() {
+fn render_system_message_uses_minimal_inline_style_for_reload_title() {
     let msg = DisplayMessage::system("Reloading server with newer binary...").with_title("Reload");
 
     let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
@@ -1733,8 +1829,16 @@ fn render_system_message_uses_reload_card_for_reload_title() {
         .join("\n");
 
     assert!(
-        plain.contains("reload"),
-        "expected reload card title: {plain}"
+        !plain.contains('╭'),
+        "unexpected reload card border: {plain}"
+    );
+    assert!(
+        !plain.contains('╰'),
+        "unexpected reload card border: {plain}"
+    );
+    assert!(
+        !plain.contains("⚡ reload"),
+        "unexpected reload card title: {plain}"
     );
     assert!(plain.contains("Reloading server with newer binary"));
 }
@@ -1895,11 +1999,7 @@ fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
     let rendered = extract_line_text(&lines[0]);
 
     assert!(rendered.contains("bash · Verify compact progress card · $ cargo test"));
-    assert_eq!(
-        lines.len(),
-        1,
-        "intent should not add vertical space: {rendered}"
-    );
+    assert_eq!(lines.len(), 1, "Bash output is hidden by default");
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(false);
 }
 
@@ -1937,7 +2037,7 @@ fn render_tool_message_hides_technical_preview_by_default() {
         !rendered.contains("cargo test"),
         "technical detail should be hidden by default: {rendered}"
     );
-    assert_eq!(lines.len(), 1, "no extra detail line expected: {rendered}");
+    assert_eq!(lines.len(), 1, "Bash output is hidden by default");
 }
 
 /// Even with details off, a failed tool row keeps its error summary so
@@ -1996,6 +2096,62 @@ fn render_tool_message_shows_token_badge() {
         .expect("missing token badge");
 
     assert_eq!(badge_span.style.fg, Some(rgb(118, 118, 118)));
+}
+
+#[test]
+fn render_tool_message_hides_bash_output() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "<class 'zip'>\n[('p', 'b'), ('a', 'a'), ('l', 'l'), ('e', 'e')]".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_bash_output".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({
+                "command": "python3 -c \"s='pale'; t='bale'; print(type(zip(s,t))); print(list(zip(s,t)))\""
+            }),
+            intent: None,
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let rendered = lines.iter().map(extract_line_text).collect::<Vec<_>>();
+
+    assert!(!rendered.iter().any(|line| line.contains("<class 'zip'>")));
+    assert!(!rendered.iter().any(|line| line.contains("[('p', 'b')")));
+}
+
+#[test]
+fn render_tool_message_shows_bash_output_when_enabled() {
+    crate::tui::ui::tools_ui::tests_show_bash_output_override::set(true);
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "one\ntwo\nthree\nfour".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_bash_output_enabled".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "printf output"}),
+            intent: Some("Print output".to_string()),
+            thought_signature: None,
+        }),
+    };
+
+    let rendered = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off)
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered.len(), 4);
+    assert!(!rendered.iter().any(|line| line.trim() == "one"));
+    assert!(rendered.iter().any(|line| line.trim() == "two"));
+    assert!(rendered.iter().any(|line| line.trim() == "four"));
+    crate::tui::ui::tools_ui::tests_show_bash_output_override::set(false);
 }
 
 fn gmail_draft_message(content: &str, input: serde_json::Value) -> DisplayMessage {
@@ -2567,6 +2723,80 @@ fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
     assert!(plain.contains("┌─ diff"), "plain={plain}");
     assert!(plain.contains("old line"), "plain={plain}");
     assert!(plain.contains("new line"), "plain={plain}");
+}
+
+#[test]
+fn render_tool_message_labels_single_file_apply_patch_diff() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "✓ src/example.rs: modified (1 hunks)".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: Some("src/example.rs".to_string()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_apply_patch_single".to_string(),
+            name: "apply_patch".to_string(),
+            input: serde_json::json!({
+                "intent": "Update example behavior",
+                "patch_text": "*** Begin Patch\n*** Update File: src/example.rs\n@@\n-old_value\n+new_value\n*** End Patch\n"
+            }),
+            intent: Some("Update example behavior".to_string()),
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("┌─ diff · src/example.rs"), "plain={plain}");
+    assert!(plain.contains("old_value"), "plain={plain}");
+    assert!(plain.contains("new_value"), "plain={plain}");
+}
+
+#[test]
+fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "✓ a.txt: modified (1 hunks)\n1- old a\n1+ new a\n✓ b.txt: modified (1 hunks)\n1- old b\n1+ new b\n".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: Some("2 files".to_string()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_apply_patch_multi".to_string(),
+            name: "apply_patch".to_string(),
+            input: serde_json::json!({
+                "intent": "Update both examples",
+                "patch_text": "*** Begin Patch\n*** Update File: a.txt\n@@\n-old a\n+new a\n*** Update File: b.txt\n@@\n-old b\n+new b\n*** End Patch\n"
+            }),
+            intent: Some("Update both examples".to_string()),
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let a_header = plain.find("┌─ diff · a.txt").expect("missing a.txt header");
+    let old_a = plain.find("old a").expect("missing a.txt deletion");
+    let new_a = plain.find("new a").expect("missing a.txt addition");
+    let b_header = plain
+        .find("├─ diff · b.txt")
+        .expect("missing b.txt boundary");
+    let old_b = plain.find("old b").expect("missing b.txt deletion");
+    let new_b = plain.find("new b").expect("missing b.txt addition");
+    assert!(
+        a_header < old_a && old_a < new_a && new_a < b_header,
+        "plain={plain}"
+    );
+    assert!(b_header < old_b && old_b < new_b, "plain={plain}");
 }
 
 #[test]

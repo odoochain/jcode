@@ -711,6 +711,17 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
         app.clear_remote_history_wait();
     }
 
+    // Hydrate route metadata as part of connection bootstrap, not when the
+    // user opens `/model`. History intentionally carries names only, so without
+    // this follow-up the public picker exposes generic `remote-catalog` rows.
+    // Request ordering keeps the authoritative History snapshot ahead of this
+    // expanded catalog response on a newly connected transport.
+    if let Err(error) = remote.request_model_catalog().await {
+        crate::logging::warn(&format!(
+            "Failed to hydrate model routes during remote bootstrap: {error}"
+        ));
+    }
+
     // Dispatch restored work once the server history is in place. This must
     // also cover a pending startup submission (e.g. a headed swarm spawn whose
     // initial prompt was staged into `app.input` with `submit_input_on_startup`),
@@ -718,12 +729,9 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
     // would show its prompt in the input box but never actually submit it,
     // because `process_remote_followups` (the only production dispatcher) was
     // never invoked post-connect. See issues #267/#268/#76.
-    if remote.has_loaded_history()
-        && !app.is_processing
-        && (app.has_queued_followups() || app.has_pending_startup_submission())
-    {
+    if !app.is_processing && (app.has_queued_followups() || app.has_pending_startup_submission()) {
         crate::logging::info(
-            "Post-connect history restored with queued followups or startup submission; dispatching immediately",
+            "Post-connect has queued followups or startup submission; dispatching immediately",
         );
         if app.pending_queued_dispatch {
             crate::logging::info(

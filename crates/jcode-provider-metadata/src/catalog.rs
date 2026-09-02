@@ -31,7 +31,7 @@ pub const ZAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.z.ai/api/coding/paas/v4",
     api_key_env: "ZHIPU_API_KEY",
     env_file: "zai.env",
-    setup_url: "https://docs.z.ai/guides/develop/openai/introduction",
+    setup_url: "https://docs.z.ai/devpack/quick-start",
     default_model: Some("glm-4.5"),
     requires_api_key: true,
 };
@@ -69,6 +69,17 @@ pub const BASETEN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+pub const CONIFER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "conifer",
+    display_name: "Conifer",
+    api_base: "https://api.conifer.build/v1",
+    api_key_env: "CONIFER_API_KEY",
+    env_file: "conifer.env",
+    setup_url: "https://www.conifer.build/docs/api/",
+    default_model: None,
+    requires_api_key: true,
+};
+
 pub const CORTECS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "cortecs",
     display_name: "Cortecs",
@@ -92,6 +103,17 @@ pub const OPENROUTER_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiComp
     api_key_env: "OPENROUTER_API_KEY",
     env_file: "openrouter.env",
     setup_url: "https://openrouter.ai/keys",
+    default_model: None,
+    requires_api_key: true,
+};
+
+pub const ORCAROUTER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "orcarouter",
+    display_name: "OrcaRouter",
+    api_base: "https://api.orcarouter.ai/v1",
+    api_key_env: "ORCAROUTER_API_KEY",
+    env_file: "orcarouter.env",
+    setup_url: "https://www.orcarouter.ai",
     default_model: None,
     requires_api_key: true,
 };
@@ -309,7 +331,7 @@ pub const MINIMAX_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "minimax",
     display_name: "MiniMax",
     api_base: "https://api.minimax.io/v1",
-    api_key_env: "OPENAI_API_KEY",
+    api_key_env: "MINIMAX_API_KEY",
     env_file: "minimax.env",
     setup_url: "https://platform.minimax.io/docs/guides/text-generation",
     default_model: Some("MiniMax-M2.7"),
@@ -375,6 +397,19 @@ pub const CEREBRAS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+pub const BELVEDIR_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "belvedir",
+    display_name: "Belvedir",
+    api_base: "https://platform.belvedir.ai/api/v1/route",
+    api_key_env: "BELVEDIR_API_KEY",
+    env_file: "belvedir.env",
+    setup_url: "https://docs.belvedir.ai/quickstart",
+    // Belvedir documents `auto` as the project router. Its inference base does
+    // not expose the conventional OpenAI-compatible `/models` endpoint.
+    default_model: Some("auto"),
+    requires_api_key: true,
+};
+
 pub const ALIBABA_CODING_PLAN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "alibaba-coding-plan",
     display_name: "Alibaba Cloud Coding Plan",
@@ -408,6 +443,17 @@ pub const XIAOMI_MIMO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile
     requires_api_key: true,
 };
 
+pub const META_MUSE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "meta-muse",
+    display_name: "Meta Model API",
+    api_base: "https://api.meta.ai/v1",
+    api_key_env: "META_MUSE_API_KEY",
+    env_file: "meta-muse.env",
+    setup_url: "https://dev.meta.ai/",
+    default_model: Some("muse-spark-1.2"),
+    requires_api_key: true,
+};
+
 pub const CELERIS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "celeris",
     display_name: "Celeris",
@@ -432,18 +478,21 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 37] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 41] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
     KIMI_PROFILE,
     CHUTES_PROFILE,
     CEREBRAS_PROFILE,
+    BELVEDIR_PROFILE,
     ALIBABA_CODING_PLAN_PROFILE,
     AI302_PROFILE,
     BASETEN_PROFILE,
+    CONIFER_PROFILE,
     CORTECS_PROFILE,
     OPENROUTER_OPENAI_COMPAT_PROFILE,
+    ORCAROUTER_PROFILE,
     ANTHROPIC_OPENAI_COMPAT_PROFILE,
     OPENAI_NATIVE_OPENAI_COMPAT_PROFILE,
     GEMINI_OPENAI_COMPAT_PROFILE,
@@ -466,6 +515,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 37] = [
     XAI_PROFILE,
     NVIDIA_NIM_PROFILE,
     XIAOMI_MIMO_PROFILE,
+    META_MUSE_PROFILE,
     CELERIS_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
@@ -513,7 +563,7 @@ pub const AUTO_IMPORT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDes
 
 pub const JCODE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "jcode",
-    display_name: "Jcode Hosted Models",
+    display_name: "Jcode Subscription",
     auth_kind: LoginProviderAuthKind::ApiKey,
     auth_state_key: LoginProviderAuthStateKey::Jcode,
     auth_status_method: "API key",
@@ -566,6 +616,19 @@ pub const OPENROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     recommended: false,
     target: LoginProviderTarget::OpenRouter,
     order: LoginProviderSurfaceOrder::new(Some(4), Some(3), Some(4), Some(3), Some(3)),
+};
+
+pub const ORCAROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "orcarouter",
+    display_name: "OrcaRouter",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["orca-router"],
+    menu_detail: "API key, OpenAI-compatible gateway",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(ORCAROUTER_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(39), Some(39), Some(39), Some(39), Some(39)),
 };
 
 pub const BEDROCK_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -627,7 +690,7 @@ pub const ZAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor 
     auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
     auth_status_method: "API key",
     aliases: &["z.ai", "z-ai", "zai-coding", "zhipu"],
-    menu_detail: "API key",
+    menu_detail: "Coding Plan subscription API key",
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(ZAI_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(7), Some(6), Some(7), Some(6), Some(6)),
@@ -678,6 +741,19 @@ pub const CEREBRAS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescri
     order: LoginProviderSurfaceOrder::new(Some(9), Some(8), Some(9), Some(8), Some(8)),
 };
 
+pub const BELVEDIR_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "belvedir",
+    display_name: "Belvedir",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["belvedir.ai", "belvedir-ai"],
+    menu_detail: "API key, OpenAI-compatible inference router",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(BELVEDIR_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(40), Some(40), Some(40), Some(40), Some(40)),
+};
+
 pub const ALIBABA_CODING_PLAN_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "alibaba-coding-plan",
     display_name: "Alibaba Cloud Coding Plan",
@@ -715,6 +791,19 @@ pub const BASETEN_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescrip
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(BASETEN_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(19), Some(19), Some(19), Some(19), Some(19)),
+};
+
+pub const CONIFER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "conifer",
+    display_name: "Conifer",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["conifer-api"],
+    menu_detail: "API key, cost-routed gateway with local models",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(CONIFER_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(40), Some(40), Some(40), Some(40), Some(40)),
 };
 
 pub const CORTECS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -951,6 +1040,21 @@ pub const XAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor 
     order: LoginProviderSurfaceOrder::new(Some(33), Some(33), Some(33), Some(33), Some(33)),
 };
 
+/// Grok Build is intentionally a separate identity from `xai`: Jcode manages
+/// its subscription backend and never consumes `XAI_API_KEY`.
+pub const GROK_BUILD_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "grok-build",
+    display_name: "Grok Build",
+    auth_kind: LoginProviderAuthKind::Cli,
+    auth_state_key: LoginProviderAuthStateKey::GrokBuild,
+    auth_status_method: "Grok Build subscription login",
+    aliases: &[],
+    menu_detail: "Grok Build subscription managed by Jcode",
+    recommended: false,
+    target: LoginProviderTarget::GrokBuild,
+    order: LoginProviderSurfaceOrder::new(Some(100), Some(100), Some(100), Some(100), Some(100)),
+};
+
 pub const NVIDIA_NIM_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "nvidia-nim",
     display_name: "NVIDIA NIM",
@@ -1086,6 +1190,19 @@ pub const XIAOMI_MIMO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDes
     order: LoginProviderSurfaceOrder::new(Some(37), Some(37), Some(37), Some(37), Some(37)),
 };
 
+pub const META_MUSE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "meta-muse",
+    display_name: "Meta Model API",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["meta", "muse", "muse-spark", "meta-model-api", "meta-ai"],
+    menu_detail: "OpenAI-compatible Meta Model API",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(META_MUSE_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
+};
+
 pub const CELERIS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "celeris",
     display_name: "Celeris",
@@ -1112,7 +1229,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 48] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 53] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1120,6 +1237,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 48] = [
     OPENAI_API_LOGIN_PROVIDER,
     JCODE_LOGIN_PROVIDER,
     OPENROUTER_LOGIN_PROVIDER,
+    ORCAROUTER_LOGIN_PROVIDER,
     BEDROCK_LOGIN_PROVIDER,
     AZURE_LOGIN_PROVIDER,
     OPENCODE_LOGIN_PROVIDER,
@@ -1128,9 +1246,11 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 48] = [
     KIMI_LOGIN_PROVIDER,
     CHUTES_LOGIN_PROVIDER,
     CEREBRAS_LOGIN_PROVIDER,
+    BELVEDIR_LOGIN_PROVIDER,
     ALIBABA_CODING_PLAN_LOGIN_PROVIDER,
     AI302_LOGIN_PROVIDER,
     BASETEN_LOGIN_PROVIDER,
+    CONIFER_LOGIN_PROVIDER,
     CORTECS_LOGIN_PROVIDER,
     DEEPSEEK_LOGIN_PROVIDER,
     COMTEGRA_LOGIN_PROVIDER,
@@ -1149,8 +1269,10 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 48] = [
     FIREWORKS_LOGIN_PROVIDER,
     MINIMAX_LOGIN_PROVIDER,
     XAI_LOGIN_PROVIDER,
+    GROK_BUILD_LOGIN_PROVIDER,
     NVIDIA_NIM_LOGIN_PROVIDER,
     XIAOMI_MIMO_LOGIN_PROVIDER,
+    META_MUSE_LOGIN_PROVIDER,
     CELERIS_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,

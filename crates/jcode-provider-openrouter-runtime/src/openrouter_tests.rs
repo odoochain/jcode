@@ -356,9 +356,68 @@ fn named_openai_compatible_provider_uses_per_model_image_input_support() {
 }
 
 #[test]
+fn named_openai_compatible_model_with_omitted_input_preserves_image_support() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "http://localhost:1234/v1".to_string(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("text-model".to_string()),
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "text-model".to_string(),
+            context_window: Some(200_000),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("local-compat", &profile)
+        .expect("local named profile should initialize without auth");
+
+    assert!(provider.supports_image_input());
+}
+
+#[test]
+fn named_openai_compatible_model_with_empty_input_preserves_image_support() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "http://localhost:1234/v1".to_string(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("text-model".to_string()),
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "text-model".to_string(),
+            reasoning: None,
+            reasoning_effort: None,
+            input: Vec::new(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("local-compat", &profile)
+        .expect("local named profile should initialize without auth");
+
+    assert!(provider.supports_image_input());
+}
+
+#[test]
 fn direct_deepseek_profile_does_not_advertise_image_input_support() {
     let provider = OpenRouterProvider {
         profile_id: Some("deepseek".to_string()),
+        supports_provider_features: false,
+        ..make_custom_compatible_provider()
+    };
+
+    assert!(!provider.supports_image_input());
+}
+
+#[test]
+fn direct_zai_profile_does_not_advertise_image_input_support() {
+    let provider = OpenRouterProvider {
+        profile_id: Some("zai".to_string()),
         supports_provider_features: false,
         ..make_custom_compatible_provider()
     };
@@ -713,6 +772,106 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
     );
 }
 
+/// Regression for issue #815: DeepSeek-family models on direct
+/// OpenAI-compatible profiles require the reasoning returned alongside an
+/// assistant tool call to be replayed on the next request. These routes do not
+/// enable OpenRouter provider features, so model-family detection must unlock
+/// the stored `reasoning_content` without adding a top-level thinking config.
+#[test]
+fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
+    let _lock = ENV_LOCK.lock();
+    let _thinking = EnvVarGuard::remove("JCODE_OPENROUTER_THINKING");
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        profile_id: Some("opencode-zen".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        model: Arc::new(RwLock::new("deepseek-v4-flash-free".to_string())),
+        ..make_custom_compatible_provider()
+    };
+
+    let messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "list the files".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Reasoning {
+                    text: "I should inspect the workspace first.".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                    thought_signature: None,
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: "a.txt\nb.txt".to_string(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            if event.is_err() {
+                break;
+            }
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    let body = parse_captured_request_body(&request);
+    let assistant = body["messages"]
+        .as_array()
+        .expect("request should contain messages array")
+        .iter()
+        .find(|message| {
+            message.get("role").and_then(|value| value.as_str()) == Some("assistant")
+                && message.get("tool_calls").is_some()
+        })
+        .expect("request should retain the assistant tool-call turn");
+
+    assert_eq!(
+        assistant
+            .get("reasoning_content")
+            .and_then(|value| value.as_str()),
+        Some("I should inspect the workspace first."),
+        "direct DeepSeek request must replay stored reasoning_content (issue #815): {assistant}"
+    );
+    assert!(
+        body.get("thinking").is_none(),
+        "server-managed thinking must not add OpenRouter's top-level thinking field: {body}"
+    );
+}
+
 #[test]
 fn minimax_profile_exposes_static_models_before_catalog_refresh() {
     let models = jcode_base::provider_catalog::openai_compatible_profile_static_models(
@@ -789,6 +948,7 @@ fn openai_compatible_profiles_with_unverified_live_catalogs_have_static_fallback
             "accounts/fireworks/routers/kimi-k2p5-turbo",
         ),
         (jcode_provider_metadata::XIAOMI_MIMO_PROFILE, "mimo-v2.5"),
+        (jcode_provider_metadata::META_MUSE_PROFILE, "muse-spark-1.2"),
         (
             jcode_provider_metadata::ALIBABA_CODING_PLAN_PROFILE,
             "qwen3-coder-plus",
@@ -1049,7 +1209,7 @@ fn test_parse_model_spec() {
     assert_eq!(model, "anthropic/claude-sonnet-4");
     let provider = provider.expect("provider");
     assert_eq!(provider.name, "Fireworks");
-    assert!(provider.allow_fallbacks);
+    assert!(!provider.allow_fallbacks);
 
     let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@Fireworks!");
     assert_eq!(model, "anthropic/claude-sonnet-4");
@@ -1065,6 +1225,22 @@ fn test_parse_model_spec() {
     let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@auto");
     assert_eq!(model, "anthropic/claude-sonnet-4");
     assert!(provider.is_none());
+}
+
+#[test]
+fn fork_preserves_explicit_provider_pin() {
+    let provider = make_provider();
+    provider
+        .set_model("z-ai/glm-5.2@Novita")
+        .expect("set explicitly pinned model");
+
+    let fork = provider.fork();
+
+    assert_eq!(fork.model(), "z-ai/glm-5.2");
+    assert_eq!(
+        fork.explicit_provider_pin_for_current_model().as_deref(),
+        Some("Novita")
+    );
 }
 
 fn make_endpoint(name: &str, throughput: f64, uptime: f64, cache: bool, cost: f64) -> EndpointInfo {
@@ -1106,6 +1282,8 @@ fn make_provider() -> OpenRouterProvider {
         supports_model_catalog: true,
         profile_id: None,
         reasoning_effort_support: None,
+        disable_reasoning_heuristics: false,
+        static_reasoning_config: HashMap::new(),
         max_tokens: None,
         extra_body: None,
         static_models: Vec::new(),
@@ -1135,6 +1313,8 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         supports_model_catalog: true,
         profile_id: None,
         reasoning_effort_support: None,
+        disable_reasoning_heuristics: false,
+        static_reasoning_config: HashMap::new(),
         max_tokens: None,
         extra_body: None,
         static_models: Vec::new(),
@@ -1231,6 +1411,46 @@ fn direct_deepseek_profile_exposes_max_reasoning_effort() {
         .set_reasoning_effort("max")
         .expect("DeepSeek direct profile should accept max effort");
     assert_eq!(provider.reasoning_effort().as_deref(), Some("max"));
+}
+
+#[test]
+fn direct_zai_profile_exposes_openai_reasoning_effort_ladder() {
+    let provider = OpenRouterProvider {
+        profile_id: Some("zai".to_string()),
+        supports_provider_features: false,
+        ..make_custom_compatible_provider()
+    };
+
+    assert_eq!(
+        provider.available_efforts(),
+        jcode_provider_core::OPENAI_SELECTABLE_EFFORTS
+    );
+    provider
+        .set_reasoning_effort("xhigh")
+        .expect("Z.AI Coding Plan should accept xhigh effort");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("xhigh"));
+}
+
+#[test]
+fn direct_zai_profile_applies_configured_effort_on_construction_and_model_switch() {
+    let configured = jcode_base::config::config()
+        .provider
+        .openai_reasoning_effort
+        .as_deref()
+        .and_then(OpenRouterProvider::normalize_openai_reasoning_effort);
+    assert_eq!(
+        OpenRouterProvider::initial_reasoning_effort(None, Some("zai")),
+        configured
+    );
+
+    let provider = OpenRouterProvider {
+        profile_id: Some("zai".to_string()),
+        supports_provider_features: false,
+        reasoning_effort: Arc::new(RwLock::new(None)),
+        ..make_custom_compatible_provider()
+    };
+    provider.set_model("glm-5.3-flash").unwrap();
+    assert_eq!(provider.reasoning_effort(), configured);
 }
 
 #[test]
@@ -1765,6 +1985,26 @@ fn direct_deepseek_profile_uses_static_1m_context_when_catalog_is_absent() {
 }
 
 #[test]
+fn explicit_cached_context_window_precedes_zai_family_fallback() {
+    let model = "glm-5.3-issue-1087";
+    jcode_base::provider::populate_context_limits(HashMap::from([(model.to_string(), 1_000_000)]));
+    let provider = OpenRouterProvider {
+        model: Arc::new(RwLock::new(model.to_string())),
+        profile_id: Some("zai".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        ..make_custom_compatible_provider()
+    };
+
+    assert_eq!(
+        jcode_base::provider_catalog::openai_compatible_profile_context_limit("zai", model),
+        Some(200_000),
+        "the regression requires a conflicting static family guess"
+    );
+    assert_eq!(provider.context_window(), 1_000_000);
+}
+
+#[test]
 fn named_openai_compatible_model_context_window_overrides_default() {
     let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
@@ -1775,6 +2015,8 @@ fn named_openai_compatible_model_context_window_overrides_default() {
         models: vec![jcode_base::config::NamedProviderModelConfig {
             id: "custom-long-context".to_string(),
             context_window: Some(512_000),
+            reasoning: None,
+            reasoning_effort: None,
             input: Vec::new(),
         }],
         ..Default::default()
@@ -1802,6 +2044,8 @@ fn named_profile_context_window_survives_provider_qualified_model() {
         models: vec![jcode_base::config::NamedProviderModelConfig {
             id: "qwen3.6-35b-a2000-128k".to_string(),
             context_window: Some(131_072),
+            reasoning: None,
+            reasoning_effort: None,
             input: Vec::new(),
         }],
         ..Default::default()
@@ -2340,13 +2584,13 @@ fn jcode_subscription_runtime_has_explicit_display_and_route_identity() {
     );
 
     let provider = OpenRouterProvider::new().expect("build jcode subscription runtime");
-    assert_eq!(provider.runtime_display_name(), "Jcode Hosted Models");
-    assert_eq!(Provider::display_name(&provider), "Jcode Hosted Models");
+    assert_eq!(provider.runtime_display_name(), "Jcode Subscription");
+    assert_eq!(Provider::display_name(&provider), "Jcode Subscription");
     assert_eq!(Provider::name(&provider), "openrouter");
     assert_eq!(
         provider.direct_openai_compatible_route_parts(),
         Some((
-            "Jcode Hosted Models".to_string(),
+            "Jcode Subscription".to_string(),
             "jcode-subscription".to_string(),
             jcode_base::subscription_catalog::DEFAULT_JCODE_API_BASE.to_string(),
         ))
@@ -2888,6 +3132,66 @@ fn named_profile_construction_reads_openai_reasoning_effort_config() {
     provider
         .set_reasoning_effort("max")
         .expect("explicitly-enabled profile accepts effort");
+}
+
+#[test]
+fn named_profile_can_disable_reasoning_model_name_heuristics() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let config = jcode_base::config::NamedProviderConfig {
+        base_url: "https://compat.example.test/v1".to_string(),
+        api_key: Some("test".to_string()),
+        default_model: Some("gpt-5.5-enterprise".to_string()),
+        disable_reasoning_heuristics: true,
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("enterprise", &config).unwrap();
+    assert!(provider.available_efforts().is_empty());
+    assert!(provider.set_reasoning_effort("high").is_err());
+}
+
+#[test]
+fn named_profile_model_reasoning_overrides_capability_and_default_effort() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let config = jcode_base::config::NamedProviderConfig {
+        base_url: "https://compat.example.test/v1".to_string(),
+        api_key: Some("test".to_string()),
+        default_model: Some("reasoning-custom".to_string()),
+        disable_reasoning_heuristics: true,
+        models: vec![
+            jcode_base::config::NamedProviderModelConfig {
+                id: "reasoning-custom".to_string(),
+                reasoning: Some(true),
+                reasoning_effort: Some("high".to_string()),
+                ..Default::default()
+            },
+            jcode_base::config::NamedProviderModelConfig {
+                id: "gpt-5-disabled".to_string(),
+                reasoning: Some(false),
+                ..Default::default()
+            },
+            jcode_base::config::NamedProviderModelConfig {
+                id: "reasoning-mini".to_string(),
+                reasoning: Some(true),
+                reasoning_effort: Some("low".to_string()),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("custom", &config).unwrap();
+    assert_eq!(provider.reasoning_effort(), Some("high".to_string()));
+    assert!(provider.available_efforts().contains(&"xhigh"));
+
+    provider.set_model("gpt-5-disabled").unwrap();
+    assert!(provider.available_efforts().is_empty());
+    assert_eq!(provider.reasoning_effort(), None);
+
+    provider.set_model("reasoning-mini").unwrap();
+    assert_eq!(provider.reasoning_effort(), Some("low".to_string()));
 }
 
 /// Regression: when the shared interactive server boots an `OpenRouterProvider`

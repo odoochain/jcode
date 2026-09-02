@@ -149,6 +149,8 @@ function linkCredentialFile(source: string, root: string, relative: string): boo
   return true;
 }
 
+export type WakeMode = "internal" | "external";
+
 export interface LaunchOptions {
   /**
    * Directory holding the instance's state (sessions, logs, credentials).
@@ -172,6 +174,17 @@ export interface LaunchOptions {
   binary?: string;
   /** Extra environment variables for the instance. */
   env?: Record<string, string>;
+  /**
+   * Model used by every spawned swarm worker. Use `inherit` to keep workers on
+   * the coordinator's model and auth route. This operator-level setting takes
+   * precedence over `env.JCODE_SWARM_MODEL`.
+   */
+  swarmModel?: string;
+  /**
+   * Who executes autonomous wake requests. This operator-level setting takes
+   * precedence over `env.JCODE_WAKE_MODE`.
+   */
+  wakeMode?: WakeMode;
   /** Milliseconds to wait for the socket to appear. Defaults to 30000. */
   startupTimeoutMs?: number;
   /** Forward the instance's stderr to this process. Defaults to false. */
@@ -349,6 +362,29 @@ function readDaemonPidSync(jcodeHome: string, runtimeDir: string): number | unde
   return undefined;
 }
 
+/** Wait briefly for a newly started daemon to publish its registry entry. */
+async function waitForDaemonPid(
+  jcodeHome: string,
+  runtimeDir: string,
+  timeoutMs = 2000,
+): Promise<number | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const pid = readDaemonPidSync(jcodeHome, runtimeDir);
+    if (pid !== undefined) return pid;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  return undefined;
+}
+
+export async function waitForDaemonPidForTest(
+  jcodeHome: string,
+  runtimeDir: string,
+  timeoutMs?: number,
+): Promise<number | undefined> {
+  return waitForDaemonPid(jcodeHome, runtimeDir, timeoutMs);
+}
+
 /**
  * Stop an instance's daemon and wait for it to actually be gone.
  *
@@ -363,7 +399,10 @@ async function stopInstanceDaemon(
   jcodeHome: string,
   runtimeDir: string,
 ): Promise<void> {
-  const pid = readDaemonPidSync(jcodeHome, runtimeDir);
+  // The API socket can become connectable just before the daemon writes its
+  // servers.json entry. close() may therefore run during this small startup
+  // window, so do not silently give up after a single registry read.
+  const pid = await waitForDaemonPid(jcodeHome, runtimeDir);
   if (pid === undefined) return;
 
   const signal = (sig: NodeJS.Signals) => {
@@ -525,6 +564,10 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
         JCODE_API_SOCKET: socketPath,
         JCODE_SOCKET: path.join(runtimeDir, "jcode.sock"),
         ...options.env,
+        ...(options.swarmModel === undefined
+          ? {}
+          : { JCODE_SWARM_MODEL: options.swarmModel }),
+        ...(options.wakeMode === undefined ? {} : { JCODE_WAKE_MODE: options.wakeMode }),
       },
       stdio: ["ignore", "ignore", options.inheritStderr ? "inherit" : "pipe"],
       detached: false,

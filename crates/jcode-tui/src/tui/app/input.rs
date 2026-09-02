@@ -801,15 +801,54 @@ pub(super) fn handle_text_paste(app: &mut App, text: String) {
     let line_count = text.lines().count().max(1);
     if line_count < 5 {
         insert_input_text(app, &text);
-    } else {
-        app.pasted_contents.push(text);
-        let placeholder = format!(
-            "[pasted {} line{}]",
-            line_count,
-            if line_count == 1 { "" } else { "s" }
-        );
-        insert_input_text(app, &placeholder);
+        return;
     }
+    if expand_matching_paste(app, &text) {
+        return;
+    }
+
+    let placeholder = paste_placeholder(&text);
+    app.pasted_contents.push(text);
+    insert_input_text(app, &placeholder);
+}
+
+fn expand_matching_paste(app: &mut App, text: &str) -> bool {
+    let Some(content_index) = app
+        .pasted_contents
+        .iter()
+        .rposition(|content| content == text)
+    else {
+        return false;
+    };
+
+    let placeholder = paste_placeholder(text);
+    // Placeholders only encode a line count. Skip placeholders belonging to
+    // newer stored pastes with the same shape so equal-length, different text
+    // cannot cause the wrong placeholder to expand.
+    let newer_same_placeholder_count = app.pasted_contents[content_index + 1..]
+        .iter()
+        .filter(|content| paste_placeholder(content) == placeholder)
+        .count();
+    let Some(placeholder_start) = app
+        .input
+        .rmatch_indices(placeholder.as_str())
+        .map(|(position, _)| position)
+        .nth(newer_same_placeholder_count)
+    else {
+        return false;
+    };
+
+    app.follow_chat_bottom_for_typing();
+    app.remember_input_undo_state();
+    app.input.replace_range(
+        placeholder_start..placeholder_start + placeholder.len(),
+        text,
+    );
+    app.cursor_pos = placeholder_start + text.len();
+    app.pasted_contents.remove(content_index);
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+    true
 }
 
 impl App {
@@ -1226,6 +1265,11 @@ pub(super) fn is_prompt_recall_modifier(modifiers: KeyModifiers) -> bool {
     )
 }
 
+pub(super) fn is_alternate_enter(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    code == KeyCode::Enter
+        && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::META)
+}
+
 pub(super) fn handle_prompt_history_navigation(
     app: &mut App,
     code: KeyCode,
@@ -1593,6 +1637,7 @@ impl App {
                 // leave incomplete todos would never be poked. Stay armed and
                 // simply do nothing this turn.
                 crate::logging::info("AUTO_POKE_DECISION action=idle reason=no_todos incomplete=0");
+                self.todo_final_response_requested = false;
                 return false;
             }
             // Deferred quality checks land here, once, instead of interrupting
@@ -1640,7 +1685,7 @@ impl App {
                     crate::telemetry::record_todo_gate(
                         crate::telemetry::TodoGateKind::ConfidenceSpike,
                     );
-                    "🔍 Double-checking a confidence jump for you..."
+                    "🔍 Double-checking confidence jumps..."
                 };
                 self.push_display_message(DisplayMessage::system(notice));
                 // User-role content: reminder-only turns read as empty user
@@ -1678,20 +1723,31 @@ impl App {
             // it stays armed so the next batch of work is covered too; only an
             // explicit /poke off (or a circuit breaker above) disarms it.
             self.auto_poke_incomplete_todos = self.auto_poke_default_on;
-            self.todo_confidence_spike_challenged = false;
             // A finished cycle re-arms the review for whatever work comes next;
             // without this a session could only ever deliver one digest.
             self.todo_gate_digest_delivered = false;
             self.todo_completion_gate_attempts = 0;
-            self.push_display_message(DisplayMessage::system(format!(
-                "✅ All todos done. Completion confidence: {}.",
-                confidence_label
-            )));
+            if !self.todo_final_response_requested {
+                self.todo_final_response_requested = true;
+                self.push_display_message(DisplayMessage::system(format!(
+                    "✅ All todos done. Completion confidence: {}.",
+                    confidence_label
+                )));
+                self.queued_messages
+                    .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
+                self.pending_queued_dispatch = true;
+                return true;
+            }
             self.pending_queued_dispatch = false;
             return false;
         }
 
         let poke_message = super::commands::build_poke_message(&incomplete);
+        self.todo_final_response_requested = false;
+        // Open work begins a new completion cycle. Keep the prior spike check
+        // latched until this point so the synthetic final-response turn cannot
+        // retrigger the same evidence gate against unchanged completed todos.
+        self.todo_confidence_spike_challenged = false;
         let fingerprint =
             serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
         if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
@@ -1793,11 +1849,11 @@ pub(super) fn is_next_prompt_new_session_hotkey(code: KeyCode, modifiers: KeyMod
     if code != KeyCode::Char(' ') {
         return false;
     }
-    // Accept either Command/Super+Space (macOS Cmd, often eaten by Spotlight) or
-    // Option/Alt+Space (macOS Option) so the fork-to-new-session arming hotkey is
-    // reachable across terminals. Reject Ctrl/Hyper combos so other chords still
-    // route to their own handlers.
-    let has_super = modifiers.contains(KeyModifiers::SUPER);
+    // Terminals report Command/Super as either SUPER or META depending on their
+    // keyboard protocol. Accept both encodings, plus Option/Alt+Space, so the
+    // shortcut remains reachable across terminals. Reject Ctrl/Hyper combos so
+    // other chords still route to their own handlers.
+    let has_super = modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::META);
     let has_alt = modifiers.contains(KeyModifiers::ALT);
     (has_super || has_alt) && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::HYPER)
 }
@@ -1902,10 +1958,6 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Char('s') => {
             app.toggle_input_stash();
-            true
-        }
-        KeyCode::Char('p') => {
-            super::commands::toggle_auto_poke_hotkey_local(app);
             true
         }
         KeyCode::Char('v') => {
@@ -2234,6 +2286,10 @@ pub(super) fn handle_pre_control_shortcuts(
 
     let macos_option_shortcut =
         crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
+    if app.toggle_keys.auto_poke.matches(code, modifiers) {
+        super::commands::toggle_auto_poke_hotkey_local(app);
+        return true;
+    }
     if app.toggle_keys.copy_selection.matches(code, modifiers) {
         app.toggle_copy_selection_mode();
         return true;
@@ -2435,7 +2491,7 @@ fn handle_inline_image_toggle_shortcut(app: &mut App, key: char) -> bool {
     true
 }
 
-fn handle_expand_edit_badge_shortcut(app: &mut App, key: char) -> bool {
+pub(super) fn handle_expand_edit_badge_shortcut(app: &mut App, key: char) -> bool {
     if !key.eq_ignore_ascii_case(&'e') {
         return false;
     }
@@ -2484,18 +2540,7 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
-    if app.changelog_scroll.is_some() {
-        app.handle_changelog_key(code)?;
-        return Ok(true);
-    }
-
-    if app.help_scroll.is_some() {
-        app.handle_help_key(code)?;
-        return Ok(true);
-    }
-
-    if app.model_status_scroll.is_some() {
-        app.handle_model_status_key(code)?;
+    if handle_scroll_overlay_key(app, code)? {
         return Ok(true);
     }
 
@@ -2553,6 +2598,20 @@ pub(super) fn handle_modal_key(
     }
 
     Ok(false)
+}
+
+pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<bool> {
+    if app.changelog_scroll.is_some() {
+        app.handle_changelog_key(code)?;
+    } else if app.help_scroll.is_some() {
+        app.handle_help_key(code)?;
+    } else if app.model_status_scroll.is_some() {
+        app.handle_model_status_key(code)?;
+    } else {
+        return Ok(false);
+    }
+
+    Ok(true)
 }
 
 pub(super) fn handle_global_control_shortcuts(
@@ -2845,6 +2904,9 @@ impl App {
         if self.handle_onboarding_sim_reset_shortcut(code, modifiers) {
             return Ok(());
         }
+        if self.handle_update_sim_shortcut(code, modifiers) {
+            return Ok(());
+        }
 
         // The onboarding simulator owns all key handling while active so the
         // real onboarding handlers and simulated modal overlays never fire (no
@@ -2951,10 +3013,9 @@ impl App {
             return Ok(());
         }
 
-        // Ctrl+Enter / Cmd+Enter: does opposite of queue_mode during processing
-        if code == KeyCode::Enter
-            && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
-        {
+        // Ctrl+Enter / Cmd+Enter: does opposite of queue_mode during processing.
+        // Terminals may encode Command as either Super or Meta.
+        if is_alternate_enter(code, modifiers) {
             handle_alternate_enter(self);
             return Ok(());
         }
@@ -3724,7 +3785,8 @@ impl App {
         // Leaving the preview should happen as soon as the user acts on it.
         self.onboarding_preview_mode = false;
 
-        // Add user message to display (show placeholder to user, not full paste)
+        // Add the expanded user message to the transcript. The composer remains compact
+        // while editing, but sent turns should show the actual pasted content.
         // Remember the typed prompt so we can restore it to the input box if this
         // turn fails (e.g. "token refresh needed"), instead of dropping it.
         self.last_submitted_input = Some(raw_input.clone());
@@ -3737,7 +3799,7 @@ impl App {
 
         self.push_display_message(DisplayMessage {
             role: "user".to_string(),
-            content: raw_input, // Show placeholder to user (condensed view)
+            content: input.clone(),
             tool_calls: vec![],
             duration_secs: None,
             title: None,
