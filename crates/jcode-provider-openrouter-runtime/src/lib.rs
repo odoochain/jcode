@@ -1419,6 +1419,21 @@ impl OpenRouterProvider {
                 Some((id.to_ascii_lowercase(), supports_images))
             })
             .collect::<HashMap<_, _>>();
+        let static_reasoning_config = profile
+            .models
+            .iter()
+            .filter_map(|model| {
+                let id = model.id.trim();
+                if id.is_empty() || (model.reasoning.is_none() && model.reasoning_effort.is_none())
+                {
+                    return None;
+                }
+                Some((
+                    id.to_ascii_lowercase(),
+                    (model.reasoning, model.reasoning_effort.clone()),
+                ))
+            })
+            .collect::<HashMap<_, _>>();
         let provider = Self {
             client: if profile.accept_invalid_certs.unwrap_or(false) {
                 jcode_provider_core::insecure_http_client()
