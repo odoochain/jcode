@@ -1383,7 +1383,6 @@ async fn run_swarm_plan_loop(
                     spawn_if_needed
                 },
                 message: params.message.clone(),
-                model: params.model.clone(),
                 effort: params.effort.clone(),
             };
             match send_request(request).await {
@@ -1534,7 +1533,6 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         initial_message: None,
         request_nonce: Some(fresh_spawn_request_nonce(ctx)),
         spawn_mode: params.spawn_mode.clone(),
-        model: params.model.clone(),
         effort: params.effort.clone(),
         label: None,
     };
@@ -1738,22 +1736,22 @@ fn format_swarm_model_list(
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "Current model (spawn default when no override): {}\n",
+        "Current coordinator model: {}\n",
         current_model.unwrap_or("unknown")
     ));
     match configured_swarm_model {
         Some(pin) if !pin.trim().is_empty() => {
             out.push_str(&format!("Configured agents.swarm_model pin: {pin}\n"));
         }
-        _ => out.push_str("No agents.swarm_model pin configured (workers inherit the coordinator's model unless a per-spawn model is passed).\n"),
+        _ => out.push_str(
+            "No agents.swarm_model pin configured (workers inherit the coordinator's model).\n",
+        ),
     }
     if model_routes.is_empty() {
-        out.push_str(
-            "\nNo model routes reported. Spawn with a bare model name or omit model to inherit.",
-        );
+        out.push_str("\nNo model routes reported. Configure agents.swarm_model or use inherit.");
         return out;
     }
-    out.push_str("\nAvailable model routes (pass as spawn model, e.g. 'gpt-5.5' or route-pinned 'openai-api:gpt-5.5'):\n");
+    out.push_str("\nAvailable model routes (configure agents.swarm_model with a bare model or route-pinned value):\n");
     for route in model_routes {
         let availability = if route.available {
             ""
@@ -1787,9 +1785,13 @@ pub struct CommunicateTool {
 
 impl CommunicateTool {
     pub fn new() -> Self {
+        Self::new_for_working_dir(None)
+    }
+
+    fn new_for_working_dir(working_dir: Option<&std::path::Path>) -> Self {
         const BASE_DESCRIPTION: &str =
             "Coordinate agents: spawn workers with a prompt, message them, and manage swarm plans.";
-        let swarm_prompt = crate::prompt::load_swarm_prompt(None);
+        let swarm_prompt = crate::prompt::load_swarm_prompt(working_dir);
         let description = if swarm_prompt.is_empty() {
             BASE_DESCRIPTION.to_string()
         } else {
@@ -1883,13 +1885,15 @@ struct CommunicateInput {
     /// threshold.
     #[serde(default)]
     tldr: Option<String>,
-    /// Per-spawn model override for spawn/assign_task/assign_next/run_plan
-    /// spawns. Takes precedence over agents.swarm_model config.
-    #[serde(default)]
-    model: Option<String>,
     /// Reasoning effort for spawned agents (none|minimal|low|medium|high|xhigh|max).
     #[serde(default)]
     effort: Option<String>,
+    /// Deliberately NOT a supported override: worker models are operator-
+    /// controlled via `agents.swarm_model` (see b76f96561). Captured only so the
+    /// tool can tell the caller the value was ignored instead of silently
+    /// spawning on the coordinator's model (#1175).
+    #[serde(default)]
+    model: Option<String>,
     /// Short human-readable label for a spawned agent shown in swarm UI.
     /// Required and nonblank for the explicit `spawn` action.
     #[serde(default)]
@@ -1897,8 +1901,35 @@ struct CommunicateInput {
 }
 
 impl CommunicateInput {
+    /// Explain that a per-spawn `model` was ignored. Worker models are chosen by
+    /// the operator (`agents.swarm_model`) or inherited from the coordinator;
+    /// silently dropping the request made "review with a different model" fail
+    /// invisibly (#1175).
+    fn ignored_spawn_model_note(&self) -> Option<String> {
+        let requested = self
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())?;
+        Some(format!(
+            "\nNote: `model: {requested}` was ignored. Per-spawn model overrides are not supported; \
+workers use `agents.swarm_model` when set, otherwise they inherit the coordinator's model. \
+Ask the operator to set `[agents] swarm_model` in ~/.jcode/config.toml (route-pinned values \
+like `openai-api:gpt-5.5` work) or run `swarm list_models` to see the effective pin."
+        ))
+    }
+
     fn spawn_initial_message(&self) -> Option<String> {
-        self.initial_message.clone().or_else(|| self.prompt.clone())
+        self.initial_message
+            .as_ref()
+            .filter(|message| !message.trim().is_empty())
+            .cloned()
+            .or_else(|| {
+                self.prompt
+                    .as_ref()
+                    .filter(|prompt| !prompt.trim().is_empty())
+                    .cloned()
+            })
     }
 
     fn required_spawn_label(&self) -> anyhow::Result<String> {
@@ -2044,10 +2075,6 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "enum": ["visible", "headless", "inline", "auto"],
                     "description": "Spawn UI mode: visible terminal, headless, inline gallery, or auto. Defaults to inline."
-                },
-                "model": {
-                    "type": "string",
-                    "description": "Model for spawned agents, e.g. 'gpt-5.5' or 'claude-api:opus'. Omit to inherit; see list_models."
                 },
                 "effort": {
                     "type": "string",
@@ -2719,6 +2746,7 @@ impl Tool for CommunicateTool {
 
             "spawn" => {
                 let label = params.required_spawn_label()?;
+                let ignored_model_note = params.ignored_spawn_model_note();
                 let request = Request::CommSpawn {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -2726,7 +2754,6 @@ impl Tool for CommunicateTool {
                     initial_message: params.spawn_initial_message(),
                     request_nonce: None,
                     spawn_mode: params.spawn_mode.clone(),
-                    model: params.model.clone(),
                     effort: params.effort.clone(),
                     label: Some(label),
                 };
@@ -2736,8 +2763,9 @@ impl Tool for CommunicateTool {
                         if !new_session_id.is_empty() =>
                     {
                         Ok(ToolOutput::new(format!(
-                            "Spawned new agent: {}",
-                            new_session_id
+                            "Spawned new agent: {}{}",
+                            new_session_id,
+                            ignored_model_note.as_deref().unwrap_or("")
                         )))
                     }
                     Ok(response) => {
@@ -3031,7 +3059,6 @@ impl Tool for CommunicateTool {
                     prefer_spawn: params.prefer_spawn,
                     spawn_if_needed: params.spawn_if_needed,
                     message: params.message.clone(),
-                    model: params.model.clone(),
                     effort: params.effort.clone(),
                 };
 
@@ -3083,7 +3110,6 @@ impl Tool for CommunicateTool {
                         prefer_spawn: params.prefer_spawn,
                         spawn_if_needed: params.spawn_if_needed,
                         message: params.message.clone(),
-                        model: params.model.clone(),
                         effort: params.effort.clone(),
                     };
 

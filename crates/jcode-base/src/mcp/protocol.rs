@@ -221,6 +221,12 @@ pub struct McpServerConfig {
     /// both are present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
+    /// Per-request reply timeout in seconds for this server (tools/call,
+    /// tools/list, initialize). Absent keeps the default of 30s. Servers whose
+    /// tools legitimately run long (multi-engine web search, browser fetch, PDF
+    /// extraction) can raise it here (issues #802, #1174).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 impl McpServerConfig {
@@ -516,6 +522,7 @@ impl McpConfig {
                             headers: std::collections::HashMap::new(),
                             enabled: None,
                             disabled: None,
+                            timeout_secs: None,
                         },
                     );
                 }
@@ -607,6 +614,7 @@ impl McpConfig {
         Self::import_from_codex_once();
 
         let mut merged = Self::default();
+        let claude_mcp_enabled = std::env::var_os("JCODE_DISABLE_CLAUDE_MCP").is_none();
 
         // Load jcode's own global config (~/.jcode/mcp.json)
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
@@ -620,7 +628,9 @@ impl McpConfig {
 
         // Claude Code user/global config (~/.claude.json): top-level mcpServers
         // plus per-project entries for the project directory.
-        if let Ok(claude_json) = crate::storage::user_home_path(".claude.json") {
+        if claude_mcp_enabled
+            && let Ok(claude_json) = crate::storage::user_home_path(".claude.json")
+        {
             if claude_json.exists() {
                 let cwd = project_dir.map(std::path::Path::to_path_buf);
                 let config = Self::load_claude_json(&claude_json, cwd.as_deref());
@@ -637,7 +647,9 @@ impl McpConfig {
         // Older Claude Code global config is also a live source. Reading it on
         // every load preserves compatibility without copying any inline env
         // values into ~/.jcode/mcp.json.
-        if let Ok(claude_mcp) = crate::storage::user_home_path(".claude/mcp.json") {
+        if claude_mcp_enabled
+            && let Ok(claude_mcp) = crate::storage::user_home_path(".claude/mcp.json")
+        {
             if claude_mcp.exists()
                 && let Ok(config) = Self::load_from_file(&claude_mcp)
             {

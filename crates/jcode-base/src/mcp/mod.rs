@@ -11,9 +11,9 @@ mod protocol;
 pub mod schema_cache;
 mod tool;
 
-pub use client::{McpClient, McpHandle};
+pub use client::{DEFAULT_MCP_REQUEST_TIMEOUT, McpClient, McpHandle, request_timeout_for};
 pub use manager::McpManager;
 pub use pool::{SharedMcpPool, get_shared_pool, init_shared_pool};
 pub use protocol::*;
 pub use schema_cache::{McpSchemaCache, fingerprint_config};
-pub use tool::{McpTool, create_mcp_tools, create_mcp_tools_from_cached};
+pub use tool::{McpTool, create_mcp_tools, create_mcp_tools_from_cached, dispatch_name};

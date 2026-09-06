@@ -5,7 +5,7 @@ use super::{
     ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState,
     VersionedPlan, broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
     queue_soft_interrupt_for_session, remove_session_channel_subscriptions,
-    remove_session_from_swarm, swarm_id_for_dir, truncate_detail, update_member_status,
+    remove_session_from_swarm, swarm_id_for_session, truncate_detail, update_member_status,
 };
 use crate::agent::Agent;
 use crate::protocol::{FeatureToggle, NotificationType, ServerEvent};
@@ -105,10 +105,9 @@ pub(super) async fn handle_notify_session(
     };
 
     let ran_immediately = if target_has_client {
-        super::live_turn::run_live_turn_if_idle(
+        super::live_turn::run_live_system_turn_if_idle(
             &session_id,
             &message,
-            None,
             ctx.sessions,
             super::live_turn::LiveTurnSwarmContext::new(
                 ctx.swarm_members,
@@ -500,7 +499,8 @@ pub(super) async fn handle_set_feature(
             }
 
             if enabled {
-                let new_swarm_id = swarm_id_for_dir(working_dir);
+                let _ = working_dir;
+                let new_swarm_id = swarm_id_for_session(client_session_id);
                 if let Some(ref id) = new_swarm_id {
                     {
                         let mut swarms = swarms_by_id.write().await;
@@ -954,7 +954,8 @@ pub(super) async fn handle_resume_all_sessions(
         };
 
         // Only act on idle sessions; a busy session is already making progress.
-        let Ok(agent_guard) = agent.try_lock() else {
+        // The owned guard doubles as the turn reservation (#1152).
+        let Ok(agent_guard) = Arc::clone(&agent).try_lock_owned() else {
             skipped += 1;
             continue;
         };
@@ -973,7 +974,6 @@ pub(super) async fn handle_resume_all_sessions(
             .session_short_name()
             .map(str::to_string)
             .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
-        drop(agent_guard);
 
         // Best-effort: record that the durable recovery intent was delivered.
         if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
@@ -989,9 +989,10 @@ pub(super) async fn handle_resume_all_sessions(
 
         super::live_turn::spawn_tracked_live_turn(
             &session_id,
-            Arc::clone(&agent),
+            agent_guard,
             String::new(),
             Some(reminder),
+            None,
             Some("resuming interrupted session".to_string()),
             super::live_turn::LiveTurnSwarmContext::new(
                 swarm_members,

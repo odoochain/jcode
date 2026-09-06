@@ -60,8 +60,17 @@ impl Provider for OpenRouterProvider {
                 None
             }
         });
-        let allow_reasoning = (self.supports_provider_features || kimi_coding_endpoint)
-            && thinking_enabled != Some(false);
+        // DeepSeek-family models served through a direct OpenAI-compatible
+        // profile can run thinking mode server-side. Their follow-up requests
+        // must replay the `reasoning_content` returned with an assistant tool
+        // call even though the route has no OpenRouter provider features
+        // (issue #815). Unlike Kimi, this only unlocks stored reasoning: it does
+        // not synthesize the field when the prior turn did not return one.
+        let direct_deepseek_model =
+            !self.supports_provider_features && Self::model_is_deepseek_family(&model);
+        let allow_reasoning =
+            (self.supports_provider_features || kimi_coding_endpoint || direct_deepseek_model)
+                && thinking_enabled != Some(false);
         let include_reasoning_content = thinking_enabled == Some(true)
             || (allow_reasoning && Self::is_kimi_model(&model))
             || kimi_coding_endpoint;
@@ -146,7 +155,14 @@ impl Provider for OpenRouterProvider {
                 // GPT-family models on direct compat gateways (e.g. OpenCode
                 // Zen serving gpt-5.3-codex-spark) take the standard OpenAI
                 // `reasoning_effort` field with OpenAI's effort vocabulary.
-                let effort = if jcode_base::prompt::is_swarm_effort(effort) {
+                let effort = if strict_openai_schema
+                    && (jcode_base::prompt::is_swarm_effort(effort) || effort == "max")
+                {
+                    // Strict OpenAI-schema endpoints such as Mistral document
+                    // xhigh as their strongest accepted value and reject the
+                    // jcode/OpenAI UX alias `max`.
+                    "xhigh"
+                } else if jcode_base::prompt::is_swarm_effort(effort) {
                     "max"
                 } else {
                     effort
@@ -291,6 +307,7 @@ impl Provider for OpenRouterProvider {
         let api_base = self.api_base.clone();
         let auth = self.auth.clone();
         let send_openrouter_headers = self.send_openrouter_headers;
+        let conversation_id = self.conversation_id.clone();
         let request_for_retries = request;
         let model_for_stream = model.clone();
         let provider_pin = Arc::clone(&self.provider_pin);
@@ -310,6 +327,7 @@ impl Provider for OpenRouterProvider {
                 api_base,
                 auth,
                 send_openrouter_headers,
+                conversation_id,
                 request_for_retries,
                 tx,
                 provider_pin,
@@ -417,6 +435,18 @@ impl Provider for OpenRouterProvider {
             }
         } else {
             self.clear_pin_if_model_changed(&model_id, true);
+        }
+
+        if Self::profile_supports_openai_reasoning_effort(self.profile_id.as_deref())
+            || self
+                .model_reasoning_config()
+                .and_then(|config| config.1.as_ref())
+                .is_some()
+        {
+            let configured = self.configured_effort_for_model();
+            if let Ok(mut effort) = self.reasoning_effort.try_write() {
+                *effort = configured;
+            }
         }
 
         let stored_effort = self
@@ -731,6 +761,13 @@ impl Provider for OpenRouterProvider {
         if let Some(limit) = self.static_context_limits.get(&normalized_model_id) {
             return *limit;
         }
+        // Config loading seeds explicit per-model context windows here. They
+        // must outrank built-in profile family guesses. See #1087.
+        if let Some(limit) =
+            jcode_base::provider::cached_context_limit_for_model(&normalized_model_id)
+        {
+            return limit;
+        }
         // Ollama caps the served window server-side (OLLAMA_CONTEXT_LENGTH,
         // default 4096) and silently truncates anything longer, so a model's
         // advertised trained window is not a safe budget. Until the native-API
@@ -742,7 +779,9 @@ impl Provider for OpenRouterProvider {
         // was actually serving 4K. It stays *below* the live catalog and the
         // user's explicit per-model `context_window`, both of which are real
         // evidence about this endpoint.
-        if super::ollama_context::is_ollama_api_base(&self.api_base, self.profile_id.as_deref()) {
+        if super::ollama_context::is_ollama_api_base(&self.api_base, self.profile_id.as_deref())
+            && !super::ollama_context::is_cloud_model(&model_id)
+        {
             return super::ollama_context::OLLAMA_DEFAULT_SERVING_CONTEXT as usize;
         }
         if let Some(profile_id) = self.profile_id.as_deref()
@@ -770,12 +809,17 @@ impl Provider for OpenRouterProvider {
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
             reasoning_effort_support: self.reasoning_effort_support,
+            disable_reasoning_heuristics: self.disable_reasoning_heuristics,
+            static_reasoning_config: self.static_reasoning_config.clone(),
             max_tokens: self.max_tokens,
             extra_body: self.extra_body.clone(),
             static_models: self.static_models.clone(),
             static_context_limits: self.static_context_limits.clone(),
             static_image_input_support: self.static_image_input_support.clone(),
             send_openrouter_headers: self.send_openrouter_headers,
+            // A fork is a new conversation (new session or subagent), so it
+            // gets its own stable id.
+            conversation_id: new_conversation_id(),
             models_cache: Arc::clone(&self.models_cache),
             model_catalog_refresh: Arc::clone(&self.model_catalog_refresh),
             provider_routing: Arc::new(RwLock::new(
@@ -784,7 +828,12 @@ impl Provider for OpenRouterProvider {
                     .map(|r| r.clone())
                     .unwrap_or_default(),
             )),
-            provider_pin: Arc::new(Mutex::new(None)),
+            provider_pin: Arc::new(Mutex::new(
+                self.provider_pin
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )),
             endpoints_cache: Arc::clone(&self.endpoints_cache),
             endpoint_refresh: Arc::clone(&self.endpoint_refresh),
         })

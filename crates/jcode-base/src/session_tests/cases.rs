@@ -698,6 +698,55 @@ fn test_recover_crashed_sessions_by_ids_restores_only_selected_group() -> Result
 }
 
 #[test]
+fn untouched_session_is_not_persisted_until_real_conversation_starts() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-lazy-save-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let id = "session_untouched_lazy_save";
+    let mut session = Session::create_with_id(id.to_string(), None, None);
+    assert!(session.ensure_initial_session_context_message());
+    session.save()?;
+    assert!(!session_path(id)?.exists());
+
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+    assert!(session_path(id)?.exists());
+    Ok(())
+}
+
+#[test]
+fn session_created_with_title_is_persisted_before_first_visible_message() -> Result<()> {
+    // Regression for #1144: `Session::create(_, Some(title))` was skipped by
+    // the untouched-session gate, so later lookups by id found nothing.
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-titled-save-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let id = "session_titled_eager_save";
+    let mut session = Session::create_with_id(id.to_string(), None, Some("review".to_string()));
+    assert!(session.ensure_initial_session_context_message());
+    session.save()?;
+    assert!(session_path(id)?.exists());
+
+    let stub = Session::load_startup_stub(id)?;
+    assert_eq!(stub.title.as_deref(), Some("review"));
+    Ok(())
+}
+
+#[test]
 fn test_save_persists_full_session_content() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
@@ -1132,7 +1181,9 @@ fn test_redacted_for_export_redacts_tool_result_and_tool_input() -> Result<()> {
             id: "tool_2".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({
-                "command": "echo ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
+                "command": "echo ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123",
+                "api_key": "short-secret-value",
+                "source": "fn add(a: i32, b: i32) -> i32 { a + b }"
             }),
             thought_signature: None,
         }],
@@ -1154,6 +1205,8 @@ fn test_redacted_for_export_redacts_tool_result_and_tool_input() -> Result<()> {
     let input_str = input.to_string();
     assert!(input_str.contains("[REDACTED_SECRET]"));
     assert!(!input_str.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"));
+    assert!(!input_str.contains("short-secret-value"));
+    assert!(input_str.contains("fn add(a: i32, b: i32)"));
     Ok(())
 }
 
@@ -1287,6 +1340,23 @@ fn test_render_messages_honors_system_display_role_override() {
     assert_eq!(rendered.len(), 1);
     assert_eq!(rendered[0].role, "system");
     assert!(rendered[0].content.contains("Background Task Completed"));
+}
+
+#[test]
+fn legacy_scheduled_task_message_renders_as_system() {
+    let mut session = Session::create(None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "[Scheduled task]\nA scheduled task for this session is now due.\n\nTask: check progress".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    let rendered = render::render_messages(&session);
+    assert_eq!(rendered.len(), 1);
+    assert_eq!(rendered[0].role, "system");
+    assert_eq!(session.visible_conversation_message_count(), 0);
 }
 
 #[test]

@@ -2,16 +2,17 @@
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5";
 
 /// Quality-first default for OpenAI-capable routes.
-pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6-sol";
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6-astra";
 
 /// Available Claude models used by model lists and provider routing.
 ///
 /// NOTE: The Mythos preview family was retired by Anthropic and 404s, so it is
 /// intentionally NOT listed here. `claude-fable-5` was briefly retired but is
-/// live again. The list is curated best-first; position 0 is the flagship
+/// live again. `claude-fable-5-1` went live 2026-08-28. The list is curated best-first; position 0 is the flagship
 /// used for post-login default selection.
 pub const ALL_CLAUDE_MODELS: &[&str] = &[
     DEFAULT_CLAUDE_MODEL,
+    "claude-fable-5-1",
     "claude-fable-5",
     "claude-opus-4-8",
     "claude-opus-4-6",
@@ -35,8 +36,13 @@ pub const CHATGPT_WEB_MODEL: &str = "gpt-5.6-pro[web]";
 /// account"). Keep them in their own list so the OAuth-scoped Codex catalog
 /// can never hide them from the picker and so route building can mark them
 /// API-key-only.
-pub const OPENAI_API_ONLY_PRO_MODELS: &[&str] =
-    &["gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.2-pro", "gpt-5-pro"];
+pub const OPENAI_API_ONLY_PRO_MODELS: &[&str] = &[
+    "gpt-5.6-pro",
+    "gpt-5.5-pro",
+    "gpt-5.4-pro",
+    "gpt-5.2-pro",
+    "gpt-5-pro",
+];
 
 /// True when `model` is a GPT Pro model that only works with an OpenAI
 /// platform API key (never ChatGPT/Codex OAuth).
@@ -52,11 +58,19 @@ pub fn is_openai_api_only_pro_model(model: &str) -> bool {
 }
 
 pub const ALL_OPENAI_MODELS: &[&str] = &[
+    // GPT-6 Astra: newest OpenAI flagship (live on api.openai.com and
+    // OpenRouter as of 2026-09). Listed explicitly because the frontier
+    // auto-promoter only accepts bare numeric ids and would skip the suffix.
     DEFAULT_OPENAI_MODEL,
+    "gpt-5.6-sol",
+    "gpt-5.6-pro",
     // ChatGPT web-only route. The `[web]` suffix is intentionally part of the
     // jcode model id so it can never be mistaken for an API/Codex model with
     // the same upstream slug.
     CHATGPT_WEB_MODEL,
+    "gpt-5.6",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5-pro",
     "gpt-5.5",
     "gpt-5.4",
@@ -80,6 +94,30 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     "gpt-5-nano",
     "gpt-5",
 ];
+
+#[cfg(test)]
+mod gpt_5_6_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn openai_catalog_exposes_the_complete_gpt_5_6_family() {
+        for model in [
+            "gpt-6-astra",
+            "gpt-5.6-sol",
+            "gpt-5.6-pro",
+            "gpt-5.6-pro[web]",
+            "gpt-5.6",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ] {
+            assert!(ALL_OPENAI_MODELS.contains(&model), "missing {model}");
+        }
+        assert!(is_openai_api_only_pro_model("gpt-5.6-pro"));
+        assert!(!is_openai_api_only_pro_model("gpt-5.6-sol"));
+        assert_eq!(DEFAULT_OPENAI_MODEL, "gpt-6-astra");
+        assert_eq!(ALL_OPENAI_MODELS[0], "gpt-6-astra");
+    }
+}
 
 /// Default context window size when model-specific data isn't known.
 pub const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
@@ -247,9 +285,10 @@ pub fn context_limit_for_model_with_provider_and_cache(
         return Some(128_000);
     }
 
-    // GPT-5.4-family models should default to the long-context window.
-    // The live Codex OAuth catalog can still override this via the dynamic cache above.
-    if model.starts_with("gpt-5.4") {
+    // GPT-5.4-family and GPT-6-family models should default to the long-context
+    // window. The live Codex OAuth catalog can still override this via the
+    // dynamic cache above.
+    if model.starts_with("gpt-5.4") || model.starts_with("gpt-6") {
         return Some(1_000_000);
     }
 
@@ -353,6 +392,11 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
     // --- Xiaomi MiMo V2 family: 256K context ---
     if m.contains("mimo") {
         return Some(262_144);
+    }
+
+    // --- Meta Muse Spark family: 1 Mi tokens ---
+    if m.contains("muse-spark") {
+        return Some(1_048_576);
     }
 
     // --- Alibaba GTE-Qwen2 retrieval models: 32K context ---

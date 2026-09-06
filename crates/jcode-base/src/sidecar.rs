@@ -11,6 +11,8 @@ use crate::auth;
 use anyhow::{Context, Result};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::sync::Arc;
 
 /// Fast/cheap OpenAI model used when Codex credentials are available.
 pub const SIDECAR_OPENAI_MODEL: &str = "gpt-5.6-luna";
@@ -19,7 +21,7 @@ const SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL: &str = "gpt-5.4";
 const SIDECAR_OPENAI_OAUTH_FALLBACK_REASONING: &str = "low";
 
 /// Fast/cheap Claude model used when only Claude credentials are available.
-const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20241022";
+const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20251001";
 
 /// OpenAI Responses API
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
@@ -33,9 +35,6 @@ const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages?beta=true";
 /// Claude Messages API endpoint for direct API-key access (no OAuth beta flag).
 const CLAUDE_API_KEY_URL: &str = "https://api.anthropic.com/v1/messages";
 
-/// User-Agent for OAuth requests (must match Claude CLI format)
-const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
-
 /// Beta headers required for OAuth
 const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219";
 
@@ -45,6 +44,80 @@ const CLAUDE_CODE_JCODE_NOTICE: &str = "You are jcode, powered by Claude Code. Y
 
 /// Maximum tokens for sidecar responses (keep small for speed/cost)
 const DEFAULT_MAX_TOKENS: u32 = 1024;
+
+/// Whether retrying a failed sidecar request can reasonably succeed without a
+/// configuration or credential change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarErrorKind {
+    Transient,
+    Permanent,
+}
+
+#[derive(Debug)]
+struct SidecarHttpError {
+    provider: &'static str,
+    status: StatusCode,
+    body: String,
+}
+
+impl fmt::Display for SidecarHttpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} API error ({}): {}",
+            self.provider, self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for SidecarHttpError {}
+
+/// Classify a sidecar failure for retry policy. HTTP client/auth/request errors
+/// are permanent; throttling, server failures, and transport failures are
+/// transient. Unknown provider errors retain the conservative retry behavior.
+pub fn classify_error(error: &anyhow::Error) -> SidecarErrorKind {
+    if let Some(error) = error.downcast_ref::<SidecarHttpError>() {
+        return classify_http_status(error.status);
+    }
+    for cause in error.chain() {
+        if let Some(error) = cause.downcast_ref::<reqwest::Error>() {
+            if let Some(status) = error.status() {
+                return classify_http_status(status);
+            }
+            return SidecarErrorKind::Transient;
+        }
+    }
+
+    // Provider-backed sidecars may not expose a typed HTTP error yet.
+    let message = error.to_string().to_ascii_lowercase();
+    if [
+        "400",
+        "401",
+        "403",
+        "404",
+        "bad request",
+        "unauthorized",
+        "forbidden",
+        "not_found_error",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        SidecarErrorKind::Permanent
+    } else {
+        SidecarErrorKind::Transient
+    }
+}
+
+fn classify_http_status(status: StatusCode) -> SidecarErrorKind {
+    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        SidecarErrorKind::Transient
+    } else if status.is_client_error() {
+        SidecarErrorKind::Permanent
+    } else {
+        SidecarErrorKind::Transient
+    }
+}
 
 /// Which backend the sidecar is using
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -66,6 +139,11 @@ pub struct Sidecar {
     model: String,
     max_tokens: u32,
     backend: SidecarBackend,
+    /// Provider snapshot selected with the model. Keeping the fork here avoids
+    /// re-resolving a mutable global provider between sidecar construction and
+    /// dispatch, which can lose an OpenAI-compatible profile and fall back to
+    /// the OpenRouter default model.
+    provider: Option<Arc<dyn crate::provider::Provider>>,
     /// Optional explicit reasoning effort override (OpenAI Responses API).
     /// When `Some`, this effort is always sent; when `None`, the default
     /// per-model behavior applies. Used by the memory benchmark to pin
@@ -82,10 +160,10 @@ impl Sidecar {
     }
 
     fn with_configured_model(configured_model: Option<String>) -> Self {
-        let (backend, model) = if let Some(model) = configured_model {
+        let (backend, model, provider) = if let Some(model) = configured_model {
             match crate::provider::provider_for_model(&model) {
-                Some("openai") => (SidecarBackend::OpenAI, model),
-                Some("claude") => (SidecarBackend::Claude, model),
+                Some("openai") => (SidecarBackend::OpenAI, model, None),
+                Some("claude") => (SidecarBackend::Claude, model, None),
                 _ => {
                     crate::logging::warn(&format!(
                         "Ignoring unsupported memory sidecar model override '{}'; expected an OpenAI or Claude model",
@@ -103,6 +181,7 @@ impl Sidecar {
             model,
             max_tokens: DEFAULT_MAX_TOKENS,
             backend,
+            provider,
             reasoning_override: None,
         }
     }
@@ -118,20 +197,36 @@ impl Sidecar {
     ///
     /// Only when no provider is registered at all do we fall back to Claude,
     /// which then fails on use with a clear credentials error.
-    fn auto_select_backend() -> (SidecarBackend, String) {
+    fn auto_select_backend() -> (
+        SidecarBackend,
+        String,
+        Option<Arc<dyn crate::provider::Provider>>,
+    ) {
         if auth::codex::load_credentials().is_ok() {
-            (SidecarBackend::OpenAI, SIDECAR_OPENAI_MODEL.to_string())
+            (
+                SidecarBackend::OpenAI,
+                SIDECAR_OPENAI_MODEL.to_string(),
+                None,
+            )
         } else if auth::claude::load_credentials().is_ok() {
-            (SidecarBackend::Claude, SIDECAR_CLAUDE_MODEL.to_string())
+            (
+                SidecarBackend::Claude,
+                SIDECAR_CLAUDE_MODEL.to_string(),
+                None,
+            )
         } else if let Some(provider) = crate::provider::active_provider_fork() {
             // Dispatch through whatever provider the user is running on. The
             // model string is informational here; the provider already has the
             // user's selected model and routes accordingly.
-            (SidecarBackend::Provider, provider.model())
+            (SidecarBackend::Provider, provider.model(), Some(provider))
         } else {
             // No credentials and no live provider: default to Claude so the
             // eventual error message is actionable.
-            (SidecarBackend::Claude, SIDECAR_CLAUDE_MODEL.to_string())
+            (
+                SidecarBackend::Claude,
+                SIDECAR_CLAUDE_MODEL.to_string(),
+                None,
+            )
         }
     }
 
@@ -166,6 +261,7 @@ impl Sidecar {
             model: model.into(),
             max_tokens: DEFAULT_MAX_TOKENS,
             backend: SidecarBackend::Claude,
+            provider: None,
             reasoning_override: None,
         }
     }
@@ -179,6 +275,7 @@ impl Sidecar {
             model: model.into(),
             max_tokens: DEFAULT_MAX_TOKENS,
             backend: SidecarBackend::OpenAI,
+            provider: None,
             reasoning_override: reasoning_effort,
         }
     }
@@ -209,7 +306,7 @@ impl Sidecar {
     /// collects the streamed `TextDelta`s into a single string. The provider was
     /// forked at construction time, so it carries the user's selected model.
     async fn complete_via_provider(&self, system: &str, user_message: &str) -> Result<String> {
-        let provider = crate::provider::active_provider_fork().context(
+        let provider = self.provider.as_ref().context(
             "No active provider registered for sidecar; memory features require a logged-in provider",
         )?;
         provider
@@ -321,6 +418,7 @@ impl Sidecar {
                             model: SIDECAR_CLAUDE_MODEL.to_string(),
                             max_tokens: self.max_tokens,
                             backend: SidecarBackend::Claude,
+                            provider: None,
                             reasoning_override: None,
                         };
                         claude.complete_claude(system, user_message).await
@@ -451,7 +549,10 @@ impl Sidecar {
             self.client
                 .post(CLAUDE_API_URL)
                 .header("Authorization", format!("Bearer {}", creds.access_token))
-                .header("User-Agent", CLAUDE_CLI_USER_AGENT)
+                .header(
+                    "User-Agent",
+                    crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
+                )
                 .header("anthropic-version", "2023-06-01")
                 .header("anthropic-beta", OAUTH_BETA_HEADERS)
                 .header("content-type", "application/json")
@@ -506,7 +607,12 @@ impl Sidecar {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Claude API error ({}): {}", status, error_text);
+            return Err(SidecarHttpError {
+                provider: "Claude",
+                status,
+                body: error_text,
+            }
+            .into());
         }
 
         let result: ClaudeMessagesResponse = response
@@ -788,9 +894,12 @@ impl OpenAiSidecarError {
 
     fn into_anyhow(self) -> anyhow::Error {
         match self {
-            Self::Api { status, body } => {
-                anyhow::anyhow!("OpenAI API error ({}): {}", status, body)
+            Self::Api { status, body } => SidecarHttpError {
+                provider: "OpenAI",
+                status,
+                body,
             }
+            .into(),
             Self::Other(err) => err,
         }
     }
@@ -1037,6 +1146,42 @@ mod tests {
     #[test]
     fn test_sidecar_fast_model() {
         assert_eq!(SIDECAR_FAST_MODEL, "gpt-5.6-luna");
+        assert_eq!(SIDECAR_CLAUDE_MODEL, "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn sidecar_http_error_classifies_permanent_client_failures() {
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+        ] {
+            let error: anyhow::Error = SidecarHttpError {
+                provider: "test",
+                status,
+                body: "failure".to_string(),
+            }
+            .into();
+            assert_eq!(classify_error(&error), SidecarErrorKind::Permanent);
+        }
+    }
+
+    #[test]
+    fn sidecar_http_error_classifies_retryable_failures() {
+        for status in [StatusCode::TOO_MANY_REQUESTS, StatusCode::BAD_GATEWAY] {
+            let error: anyhow::Error = SidecarHttpError {
+                provider: "test",
+                status,
+                body: "failure".to_string(),
+            }
+            .into();
+            assert_eq!(classify_error(&error), SidecarErrorKind::Transient);
+        }
+        assert_eq!(
+            classify_error(&anyhow::anyhow!("connection reset")),
+            SidecarErrorKind::Transient
+        );
     }
 
     #[test]
@@ -1213,6 +1358,39 @@ mod tests {
             .block_on(sidecar.complete("rank these", "1. a\n2. b"))
             .expect("provider-backed completion should succeed");
         assert_eq!(out, "[2,1]", "sidecar must return the provider's text");
+    }
+
+    #[test]
+    fn provider_sidecar_keeps_the_route_selected_at_construction() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        crate::provider::set_active_provider(std::sync::Arc::new(StubProvider {
+            name: "configured-profile",
+            reply: "configured-profile-response".to_string(),
+        }));
+        let sidecar = Sidecar::with_configured_model(None);
+
+        // Model switches and catalog refreshes can replace the process-global
+        // provider while a background memory request is queued. Dispatch must
+        // still use the exact profile fork selected above.
+        crate::provider::set_active_provider(std::sync::Arc::new(StubProvider {
+            name: "fallback-route",
+            reply: "wrong-fallback-response".to_string(),
+        }));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = rt
+            .block_on(sidecar.complete("extract memories", "conversation"))
+            .expect("provider-backed completion should retain its route");
+
+        assert_eq!(sidecar.model_name(), "configured-profile-model");
+        assert_eq!(out, "configured-profile-response");
     }
 
     /// Every provider jcode supports should drive the sidecar end-to-end via the

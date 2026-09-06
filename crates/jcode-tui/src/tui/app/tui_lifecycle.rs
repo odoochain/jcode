@@ -457,6 +457,7 @@ impl App {
             todo_confidence_spike_challenged: false,
             todo_gate_digest_delivered: false,
             todo_completion_gate_attempts: 0,
+            todo_final_response_requested: false,
             last_auto_poke_fingerprint: None,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
@@ -499,6 +500,7 @@ impl App {
             startup_submit_deferred_reason: None,
             onboarding_preview_mode: false,
             onboarding_sim: None,
+            update_sim: None,
             onboarding_flow: None,
             onboarding_auto_model_selection_active: Arc::new(AtomicBool::new(false)),
             onboarding_auto_model_selection_baseline: Arc::new(std::sync::Mutex::new(None)),
@@ -622,6 +624,8 @@ impl App {
             pinned_todos_payload: None,
             pinned_todos_rendered_hash: 0,
             pinned_todos_checked_at: None,
+            pinned_todos_expanded: false,
+            background_task_rows: Vec::new(),
             last_side_panel_refresh: None,
             last_client_focus_recorded_at: None,
             last_client_focus_session_id: None,
@@ -650,6 +654,7 @@ impl App {
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
             pending_prompt_before_history: None,
+            pending_startup_prompt_echo: None,
             pending_account_picker_action: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
@@ -899,6 +904,7 @@ impl App {
             todo_confidence_spike_challenged: false,
             todo_gate_digest_delivered: false,
             todo_completion_gate_attempts: 0,
+            todo_final_response_requested: false,
             last_auto_poke_fingerprint: None,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
@@ -941,6 +947,7 @@ impl App {
             startup_submit_deferred_reason: None,
             onboarding_preview_mode: false,
             onboarding_sim: None,
+            update_sim: None,
             onboarding_flow: None,
             onboarding_auto_model_selection_active: Arc::new(AtomicBool::new(false)),
             onboarding_auto_model_selection_baseline: Arc::new(std::sync::Mutex::new(None)),
@@ -1064,6 +1071,8 @@ impl App {
             pinned_todos_payload: None,
             pinned_todos_rendered_hash: 0,
             pinned_todos_checked_at: None,
+            pinned_todos_expanded: false,
+            background_task_rows: Vec::new(),
             last_side_panel_refresh: None,
             last_client_focus_recorded_at: None,
             last_client_focus_session_id: None,
@@ -1092,6 +1101,7 @@ impl App {
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
             pending_prompt_before_history: None,
+            pending_startup_prompt_echo: None,
             pending_account_picker_action: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
@@ -1321,10 +1331,24 @@ impl App {
         app.remote_startup_phase = Some(super::RemoteStartupPhase::Connecting);
         app.remote_startup_phase_started = Some(Instant::now());
 
+        let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        // One-shot handoff flag. A later ordinary resume in the same process
+        // must retain the existing eager local-history behavior.
+        crate::env::remove_var("JCODE_RELOAD_FAST_START");
+
         // Load session to get canary status (for "client self-dev" badge)
         if let Some(ref session_id) = resume_session {
-            app.restore_remote_startup_history(session_id);
-            if fresh_spawn {
+            if reload_fast_start {
+                crate::logging::info(&format!(
+                    "Remote reload fast start: deferring persisted transcript for {} until server history",
+                    session_id
+                ));
+            } else {
+                app.restore_remote_startup_history(session_id);
+            }
+            if fresh_spawn && !reload_fast_start {
                 crate::logging::info(&format!(
                     "Remote startup fresh-spawn path: restored persisted transcript for {} while awaiting server history",
                     session_id

@@ -327,6 +327,7 @@ pub enum CrossProviderFailoverMode {
     #[default]
     Countdown,
     /// Do not resend the prompt to another provider automatically.
+    #[serde(alias = "off", alias = "false", alias = "disabled", alias = "none")]
     Manual,
 }
 
@@ -340,7 +341,7 @@ impl CrossProviderFailoverMode {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "manual" => Some(Self::Manual),
+            "manual" | "off" | "false" | "disabled" | "none" => Some(Self::Manual),
             "countdown" | "auto" | "automatic" => Some(Self::Countdown),
             _ => None,
         }
@@ -405,15 +406,20 @@ pub enum NamedProviderType {
     #[serde(alias = "openai-compatible", alias = "openai_compatible")]
     #[default]
     OpenAiCompatible,
+    #[serde(alias = "anthropic-compatible", alias = "anthropic_compatible")]
+    AnthropicCompatible,
     OpenRouter,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NamedProviderAuth {
+    #[serde(alias = "Bearer", alias = "BEARER")]
     #[default]
     Bearer,
+    #[serde(alias = "Header", alias = "HEADER")]
     Header,
+    #[serde(alias = "None", alias = "NONE")]
     None,
 }
 
@@ -421,6 +427,18 @@ pub enum NamedProviderAuth {
 #[serde(default)]
 pub struct NamedProviderModelConfig {
     pub id: String,
+    /// Explicitly enable or disable `/effort` for this model. When omitted,
+    /// the provider-level setting and built-in model-family detection apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    /// Reasoning effort selected when this model becomes active. This overrides
+    /// `[provider].openai_reasoning_effort` for this model only.
+    #[serde(
+        default,
+        alias = "reasoning-effort",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning_effort: Option<String>,
     #[serde(
         default,
         alias = "context_limit",
@@ -443,6 +461,9 @@ pub struct NamedProviderConfig {
     pub api: Option<String>,
     pub auth: NamedProviderAuth,
     pub auth_header: Option<String>,
+    /// Extra HTTP headers sent with every request to this provider.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
     pub api_key_env: Option<String>,
     pub api_key: Option<String>,
     pub env_file: Option<String>,
@@ -475,6 +496,10 @@ pub struct NamedProviderConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub supports_reasoning_effort: Option<bool>,
+    /// Disable model-name based reasoning detection for this profile. Explicit
+    /// provider/model capability settings continue to work.
+    #[serde(default, alias = "disable-reasoning-heuristics")]
+    pub disable_reasoning_heuristics: bool,
     /// Accept invalid/self-signed TLS certificates for this endpoint.
     /// Required for endpoints using self-signed certificates (e.g. internal gateways).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -489,6 +514,7 @@ impl Default for NamedProviderConfig {
             api: None,
             auth: NamedProviderAuth::Bearer,
             auth_header: None,
+            headers: std::collections::BTreeMap::new(),
             api_key_env: None,
             api_key: None,
             env_file: None,
@@ -500,6 +526,7 @@ impl Default for NamedProviderConfig {
             models: Vec::new(),
             extra_body: None,
             supports_reasoning_effort: None,
+            disable_reasoning_heuristics: false,
             accept_invalid_certs: None,
         }
     }
@@ -527,6 +554,11 @@ pub struct AgentsConfig {
     /// string only when you deliberately want every swarm worker pinned to a
     /// specific model regardless of which model spawned them.
     pub swarm_model: Option<String>,
+    /// Optional default reasoning effort for spawned swarm/subagent sessions
+    /// (`"low"`, `"medium"`, `"high"`, ...). Applied when a `swarm spawn`
+    /// call does not pass an explicit `effort`. Leave unset to let workers
+    /// inherit the provider-wide reasoning effort.
+    pub swarm_effort: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
     /// Maximum percentage (1-90) of the chat column height the inline swarm
@@ -628,6 +660,7 @@ impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
             swarm_model: None,
+            swarm_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
             swarm_gallery_max_pct: None,
             swarm_strip_layout: SwarmStripLayout::default(),
@@ -951,6 +984,8 @@ pub struct KeybindingsConfig {
     pub scroll_prompt_down: String,
     /// Scroll bookmark toggle key (default: "ctrl+g")
     pub scroll_bookmark: String,
+    /// Toggle auto-poke (default: "ctrl+p"). Set "" to disable.
+    pub auto_poke_toggle: String,
     /// Scroll up fallback key (default: unset; Cmd+K moves up by prompt on macOS)
     pub scroll_up_fallback: String,
     /// Scroll down fallback key (default: unset; Cmd+J moves down by prompt on macOS)
@@ -1017,6 +1052,7 @@ impl Default for KeybindingsConfig {
             scroll_prompt_up: get("scroll_prompt_up", "ctrl+["),
             scroll_prompt_down: get("scroll_prompt_down", "ctrl+]"),
             scroll_bookmark: get("scroll_bookmark", "ctrl+g"),
+            auto_poke_toggle: get("auto_poke_toggle", "ctrl+p"),
             scroll_up_fallback: get("scroll_up_fallback", ""),
             scroll_down_fallback: get("scroll_down_fallback", ""),
             workspace_left: get("workspace_left", "alt+h"),
@@ -1069,6 +1105,9 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FeatureConfig {
+    /// Check for and install jcode updates during startup (default: true).
+    /// Set this to false for the persistent equivalent of `--no-update`.
+    pub check_updates: bool,
     /// Enable memory retrieval/extraction features (default: true)
     pub memory: bool,
     /// Enable swarm coordination features (default: true)
@@ -1098,6 +1137,7 @@ pub struct FeatureConfig {
 impl Default for FeatureConfig {
     fn default() -> Self {
         Self {
+            check_updates: true,
             memory: true,
             swarm: true,
             mermaid: true,
@@ -1220,6 +1260,12 @@ pub struct ProviderConfig {
     /// automatically (see `jcode_base::provider::stream_idle_timeout_for_effort`).
     /// Default: 180. Overridable via `JCODE_STREAM_IDLE_TIMEOUT_SECS`.
     pub stream_idle_timeout_secs: u64,
+    /// Maximum request attempts for transient provider errors, including the
+    /// initial attempt. Default: 8. Overridable via `JCODE_MAX_RETRIES`.
+    pub max_retries: u32,
+    /// Maximum exponential-backoff delay between transient-error retries.
+    /// Default: 30 seconds. Overridable via `JCODE_RETRY_BACKOFF_CAP_SECS`.
+    pub retry_backoff_cap_secs: u64,
 }
 
 impl Default for ProviderConfig {
@@ -1239,6 +1285,8 @@ impl Default for ProviderConfig {
             copilot_premium: None,
             model_picker_providers: None,
             stream_idle_timeout_secs: 180,
+            max_retries: 8,
+            retry_backoff_cap_secs: 30,
         }
     }
 }

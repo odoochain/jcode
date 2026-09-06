@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::*;
+
 use crate::message::{Message, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use async_trait::async_trait;
@@ -32,6 +33,19 @@ impl Provider for MockProvider {
 }
 
 #[tokio::test]
+async fn maintainer_feedback_tool_is_registered() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    assert!(
+        registry
+            .tool_names()
+            .await
+            .iter()
+            .any(|name| name == "maintainer_feedback")
+    );
+}
+
+#[tokio::test]
 async fn test_tool_definitions_are_sorted() {
     // Create registry with mock provider
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -58,6 +72,47 @@ async fn test_tool_definitions_are_sorted() {
 }
 
 #[test]
+fn deferred_mcp_surfaces_follow_umbrella_and_per_tool_filters() {
+    use std::collections::HashSet;
+
+    let umbrella = HashSet::from(["mcp".to_string()]);
+    assert!(super::tool_name_is_allowed(&umbrella, "mcp_search"));
+    assert!(super::tool_name_is_allowed(&umbrella, "mcp_call"));
+    assert!(super::tool_name_is_allowed(&umbrella, "mcp__server__tool"));
+
+    let one_tool = HashSet::from(["mcp__server__allowed".to_string()]);
+    assert!(super::tool_name_is_allowed(&one_tool, "mcp_search"));
+    assert!(super::tool_name_is_allowed(&one_tool, "mcp_call"));
+
+    let disabled = HashSet::from(["mcp".to_string()]);
+    assert!(super::tool_name_is_disabled(&disabled, "mcp_search"));
+    assert!(super::tool_name_is_disabled(&disabled, "mcp_call"));
+    assert!(super::tool_name_is_disabled(&disabled, "mcp__server__tool"));
+
+    super::set_session_tool_policy(
+        "deferred-filter-test",
+        Some(one_tool),
+        HashSet::from(["mcp__server__blocked".to_string()]),
+    );
+    assert!(super::session_mcp_dispatch_is_allowed(
+        "deferred-filter-test",
+        "mcp__server__allowed",
+        "mcp_call"
+    ));
+    assert!(!super::session_mcp_dispatch_is_allowed(
+        "deferred-filter-test",
+        "mcp__server__blocked",
+        "mcp_call"
+    ));
+    assert!(!super::session_mcp_dispatch_is_allowed(
+        "deferred-filter-test",
+        "mcp__server__other",
+        "mcp_call"
+    ));
+    super::clear_session_tool_policy("deferred-filter-test");
+}
+
+#[test]
 fn test_resolve_skill_aliases_to_skill_manage() {
     assert_eq!(Registry::resolve_tool_name("skill"), "skill_manage");
     assert_eq!(Registry::resolve_tool_name("Skill"), "skill_manage");
@@ -66,7 +121,7 @@ fn test_resolve_skill_aliases_to_skill_manage() {
 
 #[tokio::test]
 async fn test_discover_tools_not_registered_when_sponsors_disabled() {
-    // sponsors.enabled defaults to false; the discovery tool must not exist.
+    // sponsors.enabled is the legacy config key; when false, integration discovery must not exist.
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
     let names = registry.tool_names().await;
@@ -448,8 +503,8 @@ async fn print_tool_definition_token_report() {
 #[tokio::test]
 async fn tool_descriptions_stay_under_token_cap() {
     const DESCRIPTION_TOKEN_CAP: usize = 20;
-    // integration_tools keeps a deliberate second sentence disclosing that catalog
-    // entries are vetted/partnered integrations.
+    // integration_tools keeps a deliberate second sentence explaining that catalog
+    // entries integrate directly with the agent.
     // swarm appends the user-tunable swarm-prompt.md by design.
     const EXEMPT: &[&str] = &["integration_tools", "swarm"];
 

@@ -64,6 +64,22 @@ pub(super) use server_events::handle_server_event;
 
 const CONNECTION_MESSAGE_TITLE: &str = "Connection";
 const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
+
+fn handle_ctrl_kill_to_end(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    // Match the local draft semantics before remote navigation can claim Ctrl+K.
+    // Ctrl+Shift+K remains reserved for scrolling.
+    if modifiers.contains(KeyModifiers::CONTROL)
+        && !modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(code, KeyCode::Char('k'))
+        && !app.input.is_empty()
+    {
+        input::delete_input_to_end(app);
+        return true;
+    }
+
+    false
+}
+
 pub(super) enum RemoteEventOutcome {
     Continue,
     Reconnect,
@@ -114,11 +130,13 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_todo_card_if_needed();
     needs_redraw |= app.refresh_pinned_todos_if_needed();
+    needs_redraw |= app.prune_irrelevant_background_tasks();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
     needs_redraw |= app.onboarding_tick();
+    needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
 
     let _ = check_debug_command(app, remote).await;
@@ -304,6 +322,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     detect_and_cancel_stall(app, remote).await;
     needs_redraw |= recover_stuck_remote_history(app, remote).await;
     needs_redraw |= detect_starved_queued_followup(app);
+    needs_redraw |= app.maybe_finish_background_client_reload();
     needs_redraw
 }
 
@@ -373,6 +392,7 @@ async fn apply_terminal_event(
     };
     match event {
         Some(Ok(Event::FocusGained)) => {
+            crate::tui::reapply_configured_terminal_modes();
             input_attribution.event = Some("focus_gained".to_string());
             needs_redraw |= app.set_client_focused(true);
             app.note_client_focus(true);
@@ -579,6 +599,10 @@ pub(super) async fn handle_bus_event(
             super::commands::handle_git_status_completed(app, result);
             true
         }
+        Ok(BusEvent::ProductivityReportReady(event)) => {
+            app.handle_productivity_report_ready(event);
+            true
+        }
         Ok(BusEvent::MermaidRenderCompleted) => true,
         Ok(BusEvent::UsageReportProgress(progress)) => {
             app.handle_usage_report_progress(progress);
@@ -745,6 +769,7 @@ fn handle_terminal_event_while_disconnected(
 
     match event {
         Some(Ok(Event::FocusGained)) => {
+            crate::tui::reapply_configured_terminal_modes();
             needs_redraw |= app.set_client_focused(true);
             app.note_client_focus(true);
         }
@@ -1178,6 +1203,56 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     // mismatch reload-handoff stall).
     if app.pending_server_reload && !app.is_processing {
         dispatch_pending_server_reload(app, remote).await;
+        return;
+    }
+
+    // A headed fork stages its first prompt before launching the new client. We
+    // can send that prompt immediately after Subscribe, without waiting for the
+    // client to receive and render History: requests and events share one
+    // ordered socket, so the server finishes writing the Subscribe History
+    // response before it reads this Message request. Do not echo the user turn
+    // locally here because the still-in-flight History payload would clear it.
+    // Preserve the echo and apply it immediately after History instead.
+    //
+    // This removes the visible, intermittent pause between the fork window
+    // opening and its prompt starting, which was proportional to history payload
+    // transfer/render time for large parent sessions.
+    if !remote.has_loaded_history()
+        && app.submit_input_on_startup
+        && !app.is_processing
+        && !app.remote_model_switch_in_flight
+        && !app.auth_catalog_refresh_pending
+        && (!app.input.is_empty() || !app.pending_images.is_empty())
+    {
+        app.submit_input_on_startup = false;
+        app.startup_submit_deferred_reason = None;
+        let prepared = input::take_prepared_input(app);
+        app.pending_startup_prompt_echo = Some(prepared.raw_input.clone());
+        app.last_submitted_input = Some(prepared.raw_input);
+        crate::logging::info(&format!(
+            "Startup auto-submit sent behind ordered Subscribe: input_chars={} pending_images={}",
+            prepared.expanded.chars().count(),
+            prepared.images.len(),
+        ));
+        if let Err(error) = begin_remote_send(
+            app,
+            remote,
+            prepared.expanded,
+            prepared.images,
+            false,
+            None,
+            false,
+            0,
+        )
+        .await
+        {
+            crate::logging::warn(&format!("Early startup auto-submit failed: {error}"));
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to submit startup prompt: {}",
+                error
+            )));
+            app.set_status_notice("Startup prompt failed");
+        }
         return;
     }
 
@@ -1823,6 +1898,14 @@ fn handle_disconnected_key_internal(
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    if input::handle_scroll_overlay_key(app, code)? {
+        return Ok(());
+    }
+
+    if handle_ctrl_kill_to_end(app, code, modifiers) {
+        return Ok(());
+    }
+
     if input::handle_navigation_shortcuts(app, code, modifiers) {
         return Ok(());
     }
@@ -1892,7 +1975,7 @@ fn handle_disconnected_key_internal(
         }
     }
 
-    if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) {
+    if input::is_alternate_enter(code, modifiers) {
         queue_message_for_reconnect(app);
         return Ok(());
     }

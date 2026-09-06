@@ -61,6 +61,24 @@ test("cleanup refuses arbitrary directories even when asked directly", async () 
   fs.rmSync(arbitrary, { recursive: true, force: true });
 });
 
+test("daemon shutdown lookup waits for a delayed registry entry", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-daemon-race-test-"));
+  const runtimeDir = path.join(home, "run");
+  fs.mkdirSync(runtimeDir);
+  const { waitForDaemonPidForTest } = await import("../dist/launch.js");
+
+  const lookup = waitForDaemonPidForTest(home, runtimeDir, 1000);
+  setTimeout(() => {
+    fs.writeFileSync(
+      path.join(home, "servers.json"),
+      JSON.stringify({ instance: { socket: path.join(runtimeDir, "jcode.sock"), pid: 4242 } }),
+    );
+  }, 100);
+
+  assert.equal(await lookup, 4242);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
 /** Inheriting must share rotating credentials, not copy them. */
 test("rotating credentials are shared so token refresh stays coherent", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-inherit-test-"));
@@ -198,3 +216,55 @@ test("a missing jcode binary is catchable, and leaks nothing", async () => {
     .filter((name) => name.startsWith("jcode-sdk-instance-")).length;
   assert.equal(after, before, "a failed launch must not leave an instance home behind");
 });
+
+test(
+  "swarmModel reaches the launched runtime and overrides the generic environment",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { launchInstance } = await import("../dist/launch.js");
+    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-sdk-swarm-model-test-"));
+    const binary = path.join(sandbox, "capture-env");
+    const captured = path.join(sandbox, "swarm-model.txt");
+    fs.writeFileSync(
+      binary,
+      "#!/bin/sh\nprintf '%s' \"$JCODE_SWARM_MODEL\" > \"$CAPTURE_PATH\"\nexit 1\n",
+      { mode: 0o700 },
+    );
+
+    await assert.rejects(() =>
+      launchInstance({
+        binary,
+        jcodeHome: path.join(sandbox, "instance"),
+        inheritLogins: false,
+        startupTimeoutMs: 2000,
+        env: { CAPTURE_PATH: captured, JCODE_SWARM_MODEL: "unwanted-model" },
+        swarmModel: "inherit",
+      }),
+    );
+
+    assert.equal(fs.readFileSync(captured, "utf8"), "inherit");
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  },
+);
+
+test(
+  "wakeMode reaches the launched runtime and overrides the generic environment",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { launchInstance } = await import("../dist/launch.js");
+    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-sdk-wake-mode-test-"));
+    const binary = path.join(sandbox, "capture-env");
+    const captured = path.join(sandbox, "wake-mode.txt");
+    fs.writeFileSync(binary, "#!/bin/sh\nprintf '%s' \"$JCODE_WAKE_MODE\" > \"$CAPTURE_PATH\"\nexit 1\n", { mode: 0o700 });
+    await assert.rejects(() => launchInstance({
+      binary,
+      jcodeHome: path.join(sandbox, "instance"),
+      inheritLogins: false,
+      startupTimeoutMs: 2000,
+      env: { CAPTURE_PATH: captured, JCODE_WAKE_MODE: "internal" },
+      wakeMode: "external",
+    }));
+    assert.equal(fs.readFileSync(captured, "utf8"), "external");
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  },
+);

@@ -17,6 +17,67 @@ struct NativeAutoCompactionProvider;
 
 struct NativeCompactionStreamProvider;
 
+#[derive(Clone)]
+struct ExplicitPinProvider {
+    model: Arc<std::sync::Mutex<String>>,
+    pin: Arc<std::sync::Mutex<Option<String>>>,
+    set_model_requests: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ExplicitPinProvider {
+    fn new(model: &str) -> Self {
+        Self {
+            model: Arc::new(std::sync::Mutex::new(model.to_string())),
+            pin: Arc::new(std::sync::Mutex::new(None)),
+            set_model_requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ExplicitPinProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        unreachable!("ExplicitPinProvider does not complete requests")
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn set_model(&self, request: &str) -> Result<()> {
+        self.set_model_requests
+            .lock()
+            .unwrap()
+            .push(request.to_string());
+        let spec = request.strip_prefix("openrouter:").unwrap_or(request);
+        let (model, pin) = spec
+            .rsplit_once('@')
+            .map(|(model, pin)| (model, Some(pin.to_string())))
+            .unwrap_or((spec, None));
+        *self.model.lock().unwrap() = model.to_string();
+        *self.pin.lock().unwrap() = pin;
+        Ok(())
+    }
+
+    fn explicit_provider_pin_for_current_model(&self) -> Option<String> {
+        self.pin.lock().unwrap().clone()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
 fn content_text(content: &[ContentBlock]) -> &str {
     match content.first() {
         Some(ContentBlock::Text { text, .. }) => text,
@@ -117,6 +178,17 @@ impl Provider for NativeCompactionStreamProvider {
     ) -> Result<EventStream> {
         let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
         tokio::spawn(async move {
+            // Response usage is deliberately far below the provider-reported
+            // pre-compaction size so a regression that relabels usage as
+            // `pre_tokens` is caught (#1178).
+            let _ = tx
+                .send(Ok(StreamEvent::TokenUsage {
+                    input_tokens: Some(24_000),
+                    output_tokens: Some(10),
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                }))
+                .await;
             let _ = tx
                 .send(Ok(StreamEvent::Compaction {
                     trigger: "openai_native".to_string(),
@@ -315,11 +387,17 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
     while let Ok(event) = rx.try_recv() {
         if let ServerEvent::Compaction {
             trigger,
+            pre_tokens,
             messages_compacted,
             ..
         } = event
         {
             assert_eq!(trigger, "openai_native");
+            assert_eq!(
+                pre_tokens,
+                Some(80_000),
+                "remote compaction must forward the provider's pre-compaction count"
+            );
             assert!(
                 messages_compacted.is_some_and(|count| count > 0),
                 "native compaction should report a non-empty compacted prefix"
@@ -710,6 +788,15 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
     let tool_name = "gmail";
 
     assert!(
+        tool_names.iter().any(|name| name == "jcode_docs"),
+        "jcode_docs must be model-visible in regular sessions"
+    );
+    assert!(
+        !tool_names.iter().any(|name| name == "selfdev"),
+        "selfdev must not be model-visible in regular sessions"
+    );
+
+    assert!(
         definitions
             .iter()
             .any(|definition| definition.name == tool_name),
@@ -871,6 +958,38 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert_eq!(agent.last_usage.input_tokens, 0);
     assert_eq!(agent.last_usage.output_tokens, 0);
     assert!(agent.locked_tools.is_none());
+}
+
+#[tokio::test]
+async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
+    let _guard = crate::storage::lock_test_env();
+    let provider = Arc::new(ExplicitPinProvider::new("z-ai/glm-5.2"));
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let registry = Registry::new(provider_dyn.clone()).await;
+    let mut agent = Agent::new(provider_dyn, registry);
+
+    agent
+        .set_model("z-ai/glm-5.2@Novita")
+        .expect("set explicitly pinned model");
+    assert_eq!(agent.provider_model(), "z-ai/glm-5.2@Novita");
+    let persisted = crate::session::Session::load(agent.session_id()).expect("load saved session");
+    assert_eq!(persisted.model.as_deref(), Some("z-ai/glm-5.2@Novita"));
+
+    let restored_provider = Arc::new(ExplicitPinProvider::new("other/model"));
+    let restored_provider_dyn: Arc<dyn Provider> = restored_provider.clone();
+    let restored_registry = Registry::new(restored_provider_dyn.clone()).await;
+    let restored_agent =
+        Agent::new_with_session(restored_provider_dyn, restored_registry, persisted, None);
+
+    assert_eq!(
+        restored_provider
+            .set_model_requests
+            .lock()
+            .unwrap()
+            .as_slice(),
+        ["openrouter:z-ai/glm-5.2@Novita"]
+    );
+    assert_eq!(restored_agent.provider_model(), "z-ai/glm-5.2@Novita");
 }
 
 #[tokio::test]
@@ -1129,6 +1248,200 @@ impl crate::tool::Tool for FakeMcpTool {
     ) -> anyhow::Result<ToolOutput> {
         Ok(ToolOutput::new("ok"))
     }
+}
+
+struct VerboseFakeMcpTool {
+    name: String,
+    description: String,
+}
+
+#[async_trait]
+impl crate::tool::Tool for VerboseFakeMcpTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"value": {"type": "string"}}
+        })
+    }
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _ctx: crate::tool::ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        Ok(ToolOutput::new("ok"))
+    }
+}
+
+async fn register_fake_deferred_mcp_surface(registry: &Registry) {
+    for name in ["mcp_search", "mcp_call"] {
+        registry
+            .register(
+                name.to_string(),
+                Arc::new(FakeMcpTool {
+                    name: name.to_string(),
+                }) as Arc<dyn crate::tool::Tool>,
+            )
+            .await;
+    }
+}
+
+async fn agent_with_fake_mcp_surface(mode: crate::config::McpToolsMode, threshold: usize) -> Agent {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    registry
+        .register(
+            "mcp__test__verbose".to_string(),
+            Arc::new(VerboseFakeMcpTool {
+                name: "verbose".to_string(),
+                description: "large MCP definition ".repeat(32),
+            }) as Arc<dyn crate::tool::Tool>,
+        )
+        .await;
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = mode;
+    agent.mcp_tools_token_threshold = threshold;
+    agent
+}
+
+#[tokio::test]
+async fn mcp_exposure_modes_select_eager_or_fixed_definitions() {
+    let _guard = crate::storage::lock_test_env();
+
+    let mut eager = agent_with_fake_mcp_surface(crate::config::McpToolsMode::Eager, 0).await;
+    let eager_names: Vec<String> = eager
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(eager_names.iter().any(|name| name == "mcp__test__verbose"));
+    assert!(!eager_names.iter().any(|name| name == "mcp_search"));
+    assert!(!eager_names.iter().any(|name| name == "mcp_call"));
+
+    let mut deferred =
+        agent_with_fake_mcp_surface(crate::config::McpToolsMode::Deferred, usize::MAX).await;
+    let deferred_names: Vec<String> = deferred
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(!deferred_names.iter().any(|name| name.starts_with("mcp__")));
+    assert!(deferred_names.iter().any(|name| name == "mcp_search"));
+    assert!(deferred_names.iter().any(|name| name == "mcp_call"));
+
+    let mut auto_eager =
+        agent_with_fake_mcp_surface(crate::config::McpToolsMode::Auto, usize::MAX).await;
+    let auto_eager_names: Vec<String> = auto_eager
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(
+        auto_eager_names
+            .iter()
+            .any(|name| name == "mcp__test__verbose")
+    );
+
+    let mut auto_deferred = agent_with_fake_mcp_surface(crate::config::McpToolsMode::Auto, 1).await;
+    let auto_deferred_names: Vec<String> = auto_deferred
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(
+        !auto_deferred_names
+            .iter()
+            .any(|name| name.starts_with("mcp__"))
+    );
+    assert!(auto_deferred_names.iter().any(|name| name == "mcp_search"));
+    assert!(auto_deferred_names.iter().any(|name| name == "mcp_call"));
+    let stable_auto_names: Vec<String> = auto_deferred
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert_eq!(auto_deferred_names, stable_auto_names);
+    assert!(auto_deferred.mcp_late_register_resolved);
+}
+
+#[tokio::test]
+async fn deferred_mcp_surface_ignores_late_per_tool_registration() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = crate::config::McpToolsMode::Deferred;
+
+    let before: Vec<String> = agent
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    agent
+        .registry
+        .register(
+            "mcp__late__tool".to_string(),
+            Arc::new(FakeMcpTool {
+                name: "late".to_string(),
+            }) as Arc<dyn crate::tool::Tool>,
+        )
+        .await;
+    let after: Vec<String> = agent
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+
+    assert_eq!(
+        before, after,
+        "fixed deferred surface must stay cache-stable"
+    );
+    assert!(agent.mcp_late_register_resolved);
+    assert!(!after.iter().any(|name| name.starts_with("mcp__")));
+}
+
+#[tokio::test]
+async fn auto_mode_rechecks_late_mcp_definitions_before_deferring() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
+    agent.mcp_tools_token_threshold = 1;
+
+    let before = agent.tool_definitions().await;
+    assert!(!before.iter().any(|tool| tool.name == "mcp_search"));
+    agent
+        .registry
+        .register(
+            "mcp__late__large".to_string(),
+            Arc::new(VerboseFakeMcpTool {
+                name: "large".to_string(),
+                description: "late large definition ".repeat(32),
+            }) as Arc<dyn crate::tool::Tool>,
+        )
+        .await;
+
+    let after = agent.tool_definitions().await;
+    assert!(after.iter().any(|tool| tool.name == "mcp_search"));
+    assert!(after.iter().any(|tool| tool.name == "mcp_call"));
+    assert!(!after.iter().any(|tool| tool.name.starts_with("mcp__")));
+    assert!(agent.mcp_late_register_resolved);
 }
 
 /// Reproduction for #206: MCP tools that register on the registry *after* the
