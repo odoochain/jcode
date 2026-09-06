@@ -71,11 +71,43 @@ fn test_config_dir(temp: &TempDir) -> std::path::PathBuf {
     }
 }
 
+/// Root of the sandboxed jcode home used by `isolate_test_config_home`.
+fn test_jcode_home(temp: &TempDir) -> std::path::PathBuf {
+    temp.path().join("jcode-home")
+}
+
+/// Directory saved env files are read from once `JCODE_HOME` is set.
+///
+/// `storage::app_config_dir()` returns `$JCODE_HOME/config/jcode` when
+/// `JCODE_HOME` is set, so credentials written anywhere else are invisible to
+/// `load_api_key_from_env_or_config`.
+fn test_env_file_dir(temp: &TempDir) -> std::path::PathBuf {
+    test_jcode_home(temp).join("config").join("jcode")
+}
+
 fn write_test_api_key(temp: &TempDir, env_file: &str, env_key: &str, value: &str) {
-    let config_dir = test_config_dir(temp).join("jcode");
+    let config_dir = test_env_file_dir(temp);
     std::fs::create_dir_all(&config_dir).expect("create test config dir");
     std::fs::write(config_dir.join(env_file), format!("{env_key}={value}\n"))
         .expect("write test api key");
+}
+
+/// Redirect every home/config lookup jcode performs into `temp`.
+///
+/// `dirs` asks the OS for the Windows profile directory, so `HOME`,
+/// `XDG_CONFIG_HOME` and `APPDATA` alone do not keep the host's real `~/.jcode`
+/// out of these tests: `storage::jcode_dir()` falls back to the signed-in
+/// user's home and leaks their saved provider profiles into the autodetect
+/// path. `JCODE_HOME` is the only override both `jcode_dir()` and
+/// `app_config_dir()` honour on every platform.
+fn isolate_test_config_home(temp: &TempDir) -> Vec<EnvVarGuard> {
+    let config_home = test_config_dir(temp);
+    vec![
+        EnvVarGuard::set("XDG_CONFIG_HOME", temp.path()),
+        EnvVarGuard::set("HOME", temp.path()),
+        EnvVarGuard::set("APPDATA", &config_home),
+        EnvVarGuard::set("JCODE_HOME", test_jcode_home(temp)),
+    ]
 }
 
 fn isolate_openrouter_autodetect_env() -> Vec<EnvVarGuard> {
@@ -1028,9 +1060,7 @@ fn test_configured_api_base_rejects_insecure_http_remote() {
 fn autodetects_single_saved_openai_compatible_profile() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _dirs = isolate_test_config_home(&temp);
     let _env = isolate_openrouter_autodetect_env();
 
     let opencode = jcode_base::provider_catalog::resolve_openai_compatible_profile(
@@ -1053,15 +1083,13 @@ fn autodetects_single_saved_openai_compatible_profile() {
 fn autodetects_single_saved_local_openai_compatible_profile() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _dirs = isolate_test_config_home(&temp);
     let _env = isolate_openrouter_autodetect_env();
 
     let lmstudio = jcode_base::provider_catalog::resolve_openai_compatible_profile(
         jcode_base::provider_catalog::LMSTUDIO_PROFILE,
     );
-    let config_dir = test_config_dir(&temp).join("jcode");
+    let config_dir = test_env_file_dir(&temp);
     std::fs::create_dir_all(&config_dir).expect("create test config dir");
     std::fs::write(
         config_dir.join(&lmstudio.env_file),
@@ -1086,9 +1114,7 @@ fn openrouter_transport_state_distinguishes_runtime_identities() {
     // autodetect tests do, so this test does not read whatever provider
     // profile happens to be configured on the host machine.
     let temp = TempDir::new().expect("create temp dir");
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _dirs = isolate_test_config_home(&temp);
     let _env = isolate_openrouter_autodetect_env();
 
     assert_eq!(
@@ -1149,9 +1175,7 @@ fn openrouter_transport_state_distinguishes_runtime_identities() {
 fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _dirs = isolate_test_config_home(&temp);
     let _env = isolate_openrouter_autodetect_env();
 
     let opencode = jcode_base::provider_catalog::resolve_openai_compatible_profile(
@@ -1183,9 +1207,7 @@ fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
 fn autodetected_profile_seeds_default_model_and_cache_namespace() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _dirs = isolate_test_config_home(&temp);
     let _env = isolate_openrouter_autodetect_env();
 
     let zai = jcode_base::provider_catalog::resolve_openai_compatible_profile(
@@ -2069,9 +2091,7 @@ fn named_profile_context_window_survives_provider_qualified_model() {
 fn named_openai_compatible_loads_api_key_from_env_file() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _dirs = isolate_test_config_home(&temp);
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let _api_key = EnvVarGuard::remove("CUSTOM_API_KEY");
     write_test_api_key(&temp, "custom.env", "CUSTOM_API_KEY", "from-env-file");
